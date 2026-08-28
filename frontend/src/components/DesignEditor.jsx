@@ -523,18 +523,6 @@ export default function DesignEditor({ project: initialProject, onBack }) {
             </div>
           )}
         </div>
-        <p style={{ fontSize: 12, color: "#9aa0aa", maxWidth: 320 }}>
-          Drag any text to reposition it. The full video is always shown — nothing is cropped; empty space is
-          filled with plain black in the actual export. The land-type badge (top-left) shows here for reference,
-          but in the rendered MP4 it only fades in once the clip has played 25% of the way through, then stays
-          visible for the rest. The bold location line just under the badge is the same "location" field as the
-          one further down in the detail stack — dragging either one moves that copy independently. The footer
-          (enquiry numbers, company name) is fixed and the same on every video — edit{" "}
-          <code>backend/config/brand.js</code> to change it. The optional "additional text" strip just above it
-          only appears when that field is filled in. Click "Render
-          preview" for the real MP4, or "Preview as image" for an instant snapshot (which always shows the
-          badge, since it's just a design reference).
-        </p>
       </div>
 
       {/* ---- controls ---- */}
