@@ -60,24 +60,6 @@ export async function createVideoProject(req, res) {
     const audioFile = req.files.audio?.[0] || null;
     const additionalImageFile = req.files.additionalImage?.[0] || null; // optional, used only when supplied
 
-    // Compress the raw upload before it's ever persisted as rawVideoPath —
-    // shrinks disk usage right away and lightens every later preview/finalize
-    // render (see compressRawUpload's doc comment). Non-fatal: if it fails
-    // for any reason, fall back to the original upload untouched rather than
-    // blocking the whole upload over it.
-    let rawVideoPath = videoFile.path;
-    try {
-      const compressedPath = path.join(
-        path.dirname(videoFile.path),
-        `${path.basename(videoFile.path, path.extname(videoFile.path))}-compressed.mp4`
-      );
-      await compressRawUpload(videoFile.path, compressedPath);
-      fs.unlink(videoFile.path, () => {}); // drop the larger original once the compressed copy exists
-      rawVideoPath = compressedPath;
-    } catch (err) {
-      console.warn("Raw video compression failed, keeping original upload:", err.message);
-    }
-
     const doc = await Video.create({
       title,
       description,
@@ -91,16 +73,58 @@ export async function createVideoProject(req, res) {
       ownerOrAgentName,
       additionalText: additionalText || "",
       additionalImagePath: additionalImageFile ? additionalImageFile.path : null,
-      rawVideoPath,
+      rawVideoPath: videoFile.path,
       rawAudioPath: audioFile ? audioFile.path : null,
       status: "designing",
       design: { frameStyle: "gold-border", accentColor: "#D4AF37", backgroundOverlay: "rgba(0,0,0,0.25)", elements: DEFAULT_ELEMENTS },
     });
 
     res.status(201).json(doc);
+
+    // Compress the raw upload AFTER responding — never block the upload
+    // request on it. ffmpeg compression can easily take longer than a
+    // browser/proxy request timeout allows for a multi-minute clip, which is
+    // exactly what was causing the upload to show "failed" right after
+    // reaching 100% (the file was there; the request just never got its
+    // response back in time). Runs fire-and-forget here, same background
+    // pattern as the preview/finalize render jobs — see compressRawUploadJob
+    // below for what happens once it finishes.
+    compressRawUploadJob(doc._id, videoFile.path);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Upload failed", details: err.message });
+  }
+}
+
+// Fire-and-forget background compression for a just-created project's raw
+// video. Non-fatal end to end: if compression fails for any reason (corrupt
+// source, unsupported codec, etc.) the project just keeps its original,
+// uncompressed rawVideoPath — nothing here can fail the upload itself, since
+// it only ever runs after the 201 response has already been sent.
+async function compressRawUploadJob(docId, originalPath) {
+  const compressedPath = path.join(
+    path.dirname(originalPath),
+    `${path.basename(originalPath, path.extname(originalPath))}-compressed.mp4`
+  );
+  try {
+    await compressRawUpload(originalPath, compressedPath);
+
+    // The project may have moved on while compression was running (raw video
+    // deleted via "Delete source video", or the project deleted outright) —
+    // re-check before swapping the path in so we don't resurrect a stale
+    // reference or leave an orphaned compressed file with nothing pointing at it.
+    const doc = await Video.findById(docId);
+    if (!doc || doc.rawVideoPath !== originalPath) {
+      fs.unlink(compressedPath, () => {});
+      return;
+    }
+
+    doc.rawVideoPath = compressedPath;
+    await doc.save();
+    fs.unlink(originalPath, () => {}); // drop the larger original now that the compressed copy is live
+  } catch (err) {
+    console.warn(`Raw video compression failed for ${docId}, keeping original upload:`, err.message);
+    fs.unlink(compressedPath, () => {}); // clean up any partial output ffmpeg may have left behind
   }
 }
 
