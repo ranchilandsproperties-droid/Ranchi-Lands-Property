@@ -12,6 +12,16 @@ export const CANVAS_H = 1920;
 // the optional bottom-left inset always sits flush just above the footer.
 const FOOTER_STRIP_H = 150;
 
+// Gap kept clear between the footer and the very bottom edge of the canvas.
+// Previously the footer sat flush against y=CANVAS_H, which reads as "too
+// far down" on a real device — it's the exact zone Instagram Reels' own UI
+// (caption, like/comment/share icons) sits over, so the footer either got
+// visually crowded or partly obscured. Shifting the whole footer stack
+// (footer + optional additional-text strip + optional additional-image
+// inset, which are all anchored relative to it) up by this margin keeps it
+// clear of that zone.
+const FOOTER_BOTTOM_MARGIN = 60;
+
 // Optional strip directly above the footer, used only when a listing has an
 // "additional text" note set — see drawAdditionalTextStrip() below.
 const ADDITIONAL_TEXT_STRIP_H = 64;
@@ -24,7 +34,7 @@ const ADDITIONAL_TEXT_STRIP_H = 64;
 // text, reading as a stray gold/white line cutting through it. Everything
 // decorative now stops at FRAME_BOTTOM instead, a small gap above the footer.
 const FRAME_BOTTOM_GAP = 10;
-const FRAME_BOTTOM = CANVAS_H - FOOTER_STRIP_H - FRAME_BOTTOM_GAP;
+const FRAME_BOTTOM = CANVAS_H - FOOTER_STRIP_H - FOOTER_BOTTOM_MARGIN - FRAME_BOTTOM_GAP;
 
 // Resolved relative to THIS FILE's location (backend/utils/), not the
 // process's current working directory. `path.resolve("assets")` (the old
@@ -450,7 +460,7 @@ async function drawAdditionalImage(ctx, additionalImagePath, additionalStripH = 
   const size = ADDITIONAL_IMAGE_SIZE;
   const margin = 32;
   const x = margin;
-  const y = CANVAS_H - FOOTER_STRIP_H - additionalStripH - margin - size;
+  const y = CANVAS_H - FOOTER_BOTTOM_MARGIN - FOOTER_STRIP_H - additionalStripH - margin - size;
   const radius = 18;
 
   ctx.save();
@@ -691,7 +701,7 @@ function drawAdditionalTextStrip(ctx, additionalText) {
   if (!text) return 0;
 
   const stripH = ADDITIONAL_TEXT_STRIP_H;
-  const y0 = CANVAS_H - FOOTER_STRIP_H - stripH;
+  const y0 = CANVAS_H - FOOTER_BOTTOM_MARGIN - FOOTER_STRIP_H - stripH;
 
   ctx.save();
   const grad = ctx.createLinearGradient(0, y0, 0, y0 + stripH);
@@ -732,11 +742,11 @@ function drawAdditionalTextStrip(ctx, additionalText) {
 // edge, and slightly glossier icon badges.
 function drawFooter(ctx, logoImg) {
   const stripH = FOOTER_STRIP_H;
-  const y0 = CANVAS_H - stripH;
+  const y0 = CANVAS_H - FOOTER_BOTTOM_MARGIN - stripH;
   const padX = 26;
 
   ctx.save();
-  const bgGrad = ctx.createLinearGradient(0, y0, 0, CANVAS_H);
+  const bgGrad = ctx.createLinearGradient(0, y0, 0, y0 + stripH);
   bgGrad.addColorStop(0, "rgba(14,12,7,0.95)");
   bgGrad.addColorStop(1, "rgba(2,2,2,0.97)");
   ctx.fillStyle = bgGrad;

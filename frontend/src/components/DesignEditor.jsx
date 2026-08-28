@@ -24,6 +24,11 @@ const FRAME_STYLES = [
 // component's 320px-wide preview frame, so the two always stay in sync.
 const FOOTER_PREVIEW_H = 44;
 const ADDITIONAL_TEXT_PREVIEW_H = 19;
+// Gap kept clear below the footer, matching FOOTER_BOTTOM_MARGIN=60 in
+// backend/utils/renderOverlay.js (scaled the same way as the two heights
+// above) — keeps the footer stack up off the very bottom edge instead of
+// sitting flush against it.
+const FOOTER_BOTTOM_MARGIN_PREVIEW = 18;
 
 const QUALITY_OPTIONS = [
   { id: "standard", label: "Standard", hint: "fast, smaller file" },
@@ -430,7 +435,7 @@ export default function DesignEditor({ project: initialProject, onBack }) {
               style={{
                 position: "absolute",
                 left: 9,
-                bottom: FOOTER_PREVIEW_H + (project.additionalText ? ADDITIONAL_TEXT_PREVIEW_H : 0) + 6,
+                bottom: FOOTER_PREVIEW_H + FOOTER_BOTTOM_MARGIN_PREVIEW + (project.additionalText ? ADDITIONAL_TEXT_PREVIEW_H : 0) + 6,
                 width: 65,
                 height: 65,
                 borderRadius: 5,
@@ -455,7 +460,7 @@ export default function DesignEditor({ project: initialProject, onBack }) {
                 position: "absolute",
                 left: 0,
                 right: 0,
-                bottom: FOOTER_PREVIEW_H,
+                bottom: FOOTER_PREVIEW_H + FOOTER_BOTTOM_MARGIN_PREVIEW,
                 height: ADDITIONAL_TEXT_PREVIEW_H,
                 display: "flex",
                 alignItems: "center",
@@ -477,7 +482,7 @@ export default function DesignEditor({ project: initialProject, onBack }) {
               Row 2 (full width): call number pinned to the left corner,
               WhatsApp number pinned to the right corner. */}
           {brand && (
-            <div style={{ position: "absolute", left: 0, right: 0, bottom: 0, height: FOOTER_PREVIEW_H }}>
+            <div style={{ position: "absolute", left: 0, right: 0, bottom: FOOTER_BOTTOM_MARGIN_PREVIEW, height: FOOTER_PREVIEW_H }}>
               <div
                 style={{
                   height: "100%",
