@@ -36,6 +36,7 @@ export default function UploadForm({ onCreated }) {
     areaUnit: "cent",
     price: "",
     location: "",
+    locationDescriptive: "",
     contactNumber: "",
     ownerOrAgentName: "",
     additionalText: "",
@@ -60,7 +61,8 @@ export default function UploadForm({ onCreated }) {
     e.preventDefault();
     setError("");
     if (!videoFile) return setError("Please attach the raw land video.");
-    if (!form.title || !form.areaValue || !form.location) return setError("Title, area and location are required.");
+    if (!form.title || !form.areaValue || !form.location || !form.locationDescriptive)
+      return setError("Title, area, and both location fields are required.");
 
     const fd = new FormData();
     Object.entries(form).forEach(([k, v]) => fd.append(k, v));
@@ -124,8 +126,16 @@ export default function UploadForm({ onCreated }) {
       <label style={labelStyle}>Price (optional, shown as-is e.g. "₹45 Lakh")</label>
       <input style={inputStyle} value={form.price} onChange={set("price")} />
 
-      <label style={labelStyle}>Location</label>
+      <label style={labelStyle}>Location (short — bold headline shown at the top of the frame)</label>
       <input style={inputStyle} value={form.location} onChange={set("location")} placeholder="Vazhakkala, Kochi" />
+
+      <label style={labelStyle}>Location (descriptive — shown with area/price details)</label>
+      <input
+        style={inputStyle}
+        value={form.locationDescriptive}
+        onChange={set("locationDescriptive")}
+        placeholder="Near Infopark, Vazhakkala, Kochi - 682030"
+      />
 
       <div style={{ display: "flex", gap: 12 }}>
         <div style={{ flex: 1 }}>

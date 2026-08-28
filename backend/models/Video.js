@@ -30,7 +30,14 @@ const VideoSchema = new mongoose.Schema(
       default: "cent",
     },
     price: { type: String, default: "" }, // kept as string to allow "On Request", "₹45 Lakh", etc.
+    // Split into two distinct location fields:
+    //  - location: SHORT, main-highlighted location (e.g. "Vazhakkala, Kochi"),
+    //    rendered bold/large at the top of the frame just under the land-type badge.
+    //  - locationDescriptive: longer DESCRIPTIVE location text (nearby landmarks,
+    //    pincode, road access, etc.), rendered in the lower detail stack
+    //    alongside area/price.
     location: { type: String, required: true },
+    locationDescriptive: { type: String, required: true },
     contactNumber: { type: String, default: "" },
     ownerOrAgentName: { type: String, default: "" },
 

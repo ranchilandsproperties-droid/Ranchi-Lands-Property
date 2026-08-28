@@ -172,7 +172,7 @@ export async function buildTaglineOnlyPng(outPath) {
 export async function buildOverlayPng(videoDoc, outPath, { includeBadge = true, includeTagline = true } = {}) {
   const canvas = createCanvas(CANVAS_W, CANVAS_H);
   const ctx = canvas.getContext("2d");
-  const { design, title, price, areaValue, areaUnit, location, landType, additionalText, additionalImagePath } = videoDoc;
+  const { design, title, price, areaValue, areaUnit, location, locationDescriptive, landType, additionalText, additionalImagePath } = videoDoc;
 
   const logoImg = await loadBrandLogo();
 
@@ -212,6 +212,7 @@ export async function buildOverlayPng(videoDoc, outPath, { includeBadge = true, 
     price: price ? `₹ ${price}` : "",
     area: `${areaValue} ${areaUnit}`,
     location,
+    locationDescriptive,
     landType,
     additionalText: additionalText || "",
   };
@@ -573,7 +574,7 @@ function drawText(ctx, text, el) {
   ctx.textAlign = align;
   ctx.textBaseline = "top";
 
-  const isLocation = el.field === "location";
+  const isLocation = el.field === "location" || el.field === "locationDescriptive";
   const isTitle = el.field === "title";
   const pinR = isLocation ? size * 0.34 : 0;
   const pinGap = isLocation ? size * 0.42 : 0;

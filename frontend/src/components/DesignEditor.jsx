@@ -36,6 +36,7 @@ const FIELD_PREVIEW = (project) => ({
   price: project.price ? `₹ ${project.price}` : "",
   area: `${project.areaValue} ${project.areaUnit}`,
   location: project.location,
+  locationDescriptive: project.locationDescriptive,
   landType: project.landType,
   additionalText: project.additionalText || "",
 });
@@ -363,7 +364,7 @@ export default function DesignEditor({ project: initialProject, onBack }) {
           </div>
 
           {design.elements.map((el) => {
-            const isLocation = el.field === "location";
+            const isLocation = el.field === "location" || el.field === "locationDescriptive";
             const isArea = el.field === "area";
             const isPrice = el.field === "price";
             const hasIcon = isLocation || isArea || isPrice;

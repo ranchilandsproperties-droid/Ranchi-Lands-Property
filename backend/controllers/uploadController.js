@@ -2,19 +2,21 @@ import fs from "fs";
 import Video from "../models/Video.js";
 
 const DEFAULT_ELEMENTS = [
-  // New: a prominent, bold, icon-led location line at the TOP of the frame,
+  // A prominent, bold, icon-led SHORT location line at the TOP of the frame,
   // directly under the land-type badge (badge sits at canvas y:172-236px,
-  // i.e. ~9-12.3% of the 1920-tall canvas) — same field as el-location
-  // below, just a second, larger/bolder placement for at-a-glance framing.
+  // i.e. ~9-12.3% of the 1920-tall canvas) — a second, larger/bolder
+  // placement for at-a-glance framing. Field: "location" (short, main
+  // highlighted location, e.g. "Vazhakkala, Kochi").
   // x:5.6% (~60px) lines up with the badge's left edge.
   { id: "el-location-top", type: "text", field: "location", x: 5.6, y: 13, fontSize: 46, color: "#FFFFFF", pinColor: "#D4AF37", bold: true, align: "left", background: false },
   { id: "el-title", type: "text", field: "title", x: 8, y: 65, fontSize: 64, color: "#FFFFFF", bold: true, align: "left" },
-  // Kept exactly as before — same field, position, size, and style as
-  // always, still shown together with the title/area/price detail stack.
-  // Nudged up (was y:80/85/90) so the stack clears the additional-text
-  // strip + footer (which together occupy the bottom ~11% of the frame)
-  // even when a listing has additional text set — see the price note below.
-  { id: "el-location", type: "text", field: "location", x: 8, y: 73, fontSize: 38, color: "#F1F1F1", bold: false, align: "left" },
+  // DESCRIPTIVE location line, shown together with the title/area/price
+  // detail stack. Field: "locationDescriptive" (longer text — nearby
+  // landmarks, pincode, road access, etc.). Nudged up (was y:80/85/90) so
+  // the stack clears the additional-text strip + footer (which together
+  // occupy the bottom ~11% of the frame) even when a listing has
+  // additional text set — see the price note below.
+  { id: "el-location", type: "text", field: "locationDescriptive", x: 8, y: 73, fontSize: 38, color: "#F1F1F1", bold: false, align: "left" },
   { id: "el-area", type: "text", field: "area", x: 8, y: 78.5, fontSize: 38, color: "#F1F1F1", bold: false, align: "left" },
   // Price stays at this fixed spot (x:8, y:84) always — it is OPTIONAL, not
   // repositioned: fieldValue.price below resolves to "" when no price is
@@ -39,6 +41,7 @@ export async function createVideoProject(req, res) {
       areaUnit,
       price,
       location,
+      locationDescriptive,
       contactNumber,
       ownerOrAgentName,
       additionalText,
@@ -47,8 +50,8 @@ export async function createVideoProject(req, res) {
     if (!req.files?.video?.[0]) {
       return res.status(400).json({ error: "A raw video file is required." });
     }
-    if (!title || !landType || !areaValue || !location) {
-      return res.status(400).json({ error: "title, landType, areaValue and location are required." });
+    if (!title || !landType || !areaValue || !location || !locationDescriptive) {
+      return res.status(400).json({ error: "title, landType, areaValue, location and locationDescriptive are required." });
     }
 
     const videoFile = req.files.video[0];
@@ -63,6 +66,7 @@ export async function createVideoProject(req, res) {
       areaUnit: areaUnit || "cent",
       price,
       location,
+      locationDescriptive,
       contactNumber,
       ownerOrAgentName,
       additionalText: additionalText || "",
