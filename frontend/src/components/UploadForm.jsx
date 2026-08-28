@@ -49,6 +49,13 @@ export default function UploadForm({ onCreated }) {
 
   const set = (key) => (e) => setForm((f) => ({ ...f, [key]: e.target.value }));
 
+  // Named explicitly (video vs. audio) rather than a generic "uploading your
+  // file" — the two are easy to mix up when only one of the two file inputs
+  // was actually filled in, and the audio track especially is easy to forget
+  // was attached at all.
+  const uploadLabel = audioFile ? "Uploading video + audio" : "Uploading video";
+  const totalUploadMb = ((videoFile?.size || 0) + (audioFile?.size || 0)) / (1024 * 1024);
+
   async function handleSubmit(e) {
     e.preventDefault();
     setError("");
@@ -64,13 +71,15 @@ export default function UploadForm({ onCreated }) {
     try {
       setLoading(true);
       setUploadPercent(0);
-      const doc = await createProject(fd, setUploadPercent);
+      const doc = await createProject(fd, (evt) => {
+        if (!evt.total) return;
+        setUploadPercent(Math.round((evt.loaded / evt.total) * 100));
+      });
       onCreated(doc);
     } catch (err) {
       setError(err?.response?.data?.error || "Upload failed");
     } finally {
       setLoading(false);
-      setUploadPercent(0);
     }
   }
 
@@ -148,14 +157,16 @@ export default function UploadForm({ onCreated }) {
 
       {error && <p style={{ color: "#ff6b6b" }}>{error}</p>}
 
+      <button
+        type="submit"
+        disabled={loading}
+        style={{ padding: "12px 20px", borderRadius: 8, border: "none", background: "#D4AF37", color: "#111", fontWeight: 700, cursor: "pointer" }}
+      >
+        {loading ? `${uploadLabel}… ${uploadPercent}%` : "Upload & start designing →"}
+      </button>
+
       {loading && (
-        <div style={{ marginBottom: 14 }}>
-          <p style={{ fontSize: 13, color: "#9aa0aa", margin: "0 0 6px" }}>
-            Uploading {videoFile ? "video" : ""}
-            {videoFile && audioFile ? " and " : ""}
-            {audioFile ? "audio" : ""}
-            {additionalImageFile ? " (+ image)" : ""} — {uploadPercent}%
-          </p>
+        <div style={{ marginTop: 10 }}>
           <div style={{ height: 8, borderRadius: 4, background: "#181b22", overflow: "hidden" }}>
             <div
               style={{
@@ -166,16 +177,11 @@ export default function UploadForm({ onCreated }) {
               }}
             />
           </div>
+          <p style={{ fontSize: 12, color: "#9aa0aa", marginTop: 6 }}>
+            {uploadLabel} ({totalUploadMb.toFixed(1)} MB) — {uploadPercent}%
+          </p>
         </div>
       )}
-
-      <button
-        type="submit"
-        disabled={loading}
-        style={{ padding: "12px 20px", borderRadius: 8, border: "none", background: "#D4AF37", color: "#111", fontWeight: 700, cursor: "pointer" }}
-      >
-        {loading ? `Uploading… ${uploadPercent}%` : "Upload & start designing →"}
-      </button>
     </form>
   );
 }

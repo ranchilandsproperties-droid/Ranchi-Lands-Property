@@ -65,6 +65,15 @@ export default function DesignEditor({ project: initialProject, onBack }) {
   const [previewImageUrl, setPreviewImageUrl] = useState(null);
   const [previewImageLoading, setPreviewImageLoading] = useState(false);
 
+  // Live progress (0-100) for whichever background job is currently running —
+  // shared across preview render / preview image / finalize since only one of
+  // the three can be "rendering" for a given project at once (the backend
+  // rejects a second job with 409 while one is in flight). Driven by
+  // `jobProgress` on the polled project doc (see api.js's pollUntilRenderDone
+  // onTick), which in turn comes from ffmpeg's own progress events for the two
+  // video jobs, or jumps straight to 100 on completion for preview-image.
+  const [renderProgress, setRenderProgress] = useState(0);
+
   useEffect(() => {
     getBrand().then(setBrand).catch(() => {});
   }, []);
@@ -120,9 +129,12 @@ export default function DesignEditor({ project: initialProject, onBack }) {
   async function handlePreview() {
     await persistDesign();
     setRendering(true);
+    setRenderProgress(0);
     try {
       await renderPreview(project._id, previewQuality); // starts the background job
-      const finished = await pollUntilRenderDone(project._id); // waits for jobStatus to leave "rendering"
+      const finished = await pollUntilRenderDone(project._id, {
+        onTick: (p) => setRenderProgress(p.jobProgress || 0),
+      });
       setProject(finished);
       setPreviewUrl(outputsUrl(finished.previewOutputPath));
     } catch (err) {
@@ -163,14 +175,19 @@ export default function DesignEditor({ project: initialProject, onBack }) {
 
   // Fast static JPEG snapshot of the generated template — lets you check the
   // frame/text/badge/footer/optional extras without waiting for a full MP4 render.
+  // Now a background job like the two video renders (see
+  // renderController.js's renderPreviewImageCtrl) — starts it and polls
+  // rather than waiting on one long response.
   async function handlePreviewImage() {
     await persistDesign();
     setPreviewImageLoading(true);
     try {
-      const res = await renderPreviewImage(project._id);
-      setPreviewImageUrl(assetUrl(res.previewImageUrl) + `?t=${Date.now()}`);
+      await renderPreviewImage(project._id); // starts the background job
+      const finished = await pollUntilRenderDone(project._id);
+      setProject(finished);
+      setPreviewImageUrl(outputsUrl(finished.previewImagePath));
     } catch (err) {
-      alert(err?.response?.data?.error || "Preview image generation failed");
+      alert(err?.response?.data?.error || err.message || "Preview image generation failed");
     } finally {
       setPreviewImageLoading(false);
     }
@@ -179,9 +196,12 @@ export default function DesignEditor({ project: initialProject, onBack }) {
   async function handleFinalize() {
     await persistDesign();
     setFinalizing(true);
+    setRenderProgress(0);
     try {
       await finalizeProject(project._id, finalQuality); // starts the background job
-      const finished = await pollUntilRenderDone(project._id);
+      const finished = await pollUntilRenderDone(project._id, {
+        onTick: (p) => setRenderProgress(p.jobProgress || 0),
+      });
       setProject(finished);
       setFinalUrl(outputsUrl(finished.finalOutputPath));
     } catch (err) {
@@ -614,11 +634,7 @@ export default function DesignEditor({ project: initialProject, onBack }) {
               {previewImageLoading ? "Generating…" : "Preview as image (fast)"}
             </button>
           </div>
-          {rendering && (
-            <p style={{ fontSize: 12, color: "#9aa0aa", marginTop: 8 }}>
-              Rendering — this runs in the background and can take a few minutes; feel free to leave this open.
-            </p>
-          )}
+          {rendering && <RenderProgressBar percent={renderProgress} />}
           {previewImageUrl && (
             <div style={{ marginTop: 14 }}>
               <p style={{ fontSize: 12, color: "#9aa0aa", margin: "0 0 6px" }}>Static preview of the generated template:</p>
@@ -639,11 +655,7 @@ export default function DesignEditor({ project: initialProject, onBack }) {
           <button onClick={handleFinalize} disabled={finalizing} style={{ ...secondaryBtn, marginTop: 10 }}>
             {finalizing ? "Finalizing…" : "Finalize & export"}
           </button>
-          {finalizing && (
-            <p style={{ fontSize: 12, color: "#9aa0aa", marginTop: 8 }}>
-              Rendering — this runs in the background and can take a few minutes; feel free to leave this open.
-            </p>
-          )}
+          {finalizing && <RenderProgressBar percent={renderProgress} />}
           {finalUrl && (
             <div style={{ marginTop: 14 }}>
               <p style={{ fontWeight: 700, color: "#7CFC9A" }}>✅ Final export ready</p>
@@ -728,6 +740,31 @@ function QualityPicker({ value, onChange }) {
           {q.label}
         </button>
       ))}
+    </div>
+  );
+}
+
+// Shared progress display for preview render / finalize — both feed it the
+// same `jobProgress` field polled off the project doc (see handlePreview /
+// handleFinalize's onTick above). Percent is 0 until ffmpeg reports its first
+// progress event, which for a short clip can take a moment — the caption
+// covers that gap instead of showing a misleadingly stuck "0%".
+function RenderProgressBar({ percent }) {
+  return (
+    <div style={{ marginTop: 8 }}>
+      <div style={{ height: 8, borderRadius: 4, background: "#181b22", overflow: "hidden" }}>
+        <div
+          style={{
+            height: "100%",
+            width: `${Math.max(percent, 3)}%`,
+            background: "#D4AF37",
+            transition: "width 0.3s ease",
+          }}
+        />
+      </div>
+      <p style={{ fontSize: 12, color: "#9aa0aa", marginTop: 6 }}>
+        {percent > 0 ? `Rendering — ${percent}%` : "Rendering — starting…"} (runs in the background; feel free to leave this open)
+      </p>
     </div>
   );
 }

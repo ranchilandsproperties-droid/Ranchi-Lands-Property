@@ -9,15 +9,17 @@ export const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
 
 const api = axios.create({ baseURL: `${API_BASE}/api` });
 
+// `onUploadProgress`, if given, is called with axios's native progress event
+// ({ loaded, total, ... }) as the multipart body streams up — lets the
+// frontend show a real upload percentage instead of just a spinner, which
+// matters here specifically because the video (and optional audio) file are
+// often large enough that "uploading" is a meaningfully long wait on its own,
+// separate from the render step later.
 export const createProject = (formData, onUploadProgress) =>
   api
     .post("/videos", formData, {
       headers: { "Content-Type": "multipart/form-data" },
-      onUploadProgress: onUploadProgress
-        ? (evt) => {
-            if (evt.total) onUploadProgress(Math.round((evt.loaded / evt.total) * 100));
-          }
-        : undefined,
+      onUploadProgress,
     })
     .then((r) => r.data);
 
@@ -37,18 +39,24 @@ export const renderPreviewImage = (id) => api.post(`/videos/${id}/preview-image`
 
 export const finalizeProject = (id, quality) => api.post(`/videos/${id}/finalize`, { quality }).then((r) => r.data);
 
-// renderPreview/finalizeProject above both just START a background render
-// job and return right away (see backend/controllers/renderController.js —
-// full video renders are too slow to hold one HTTP request open for on a
-// slow/free-tier host). This polls GET /api/videos/:id until the project's
-// jobStatus leaves "rendering", then resolves with the final project doc.
-// Throws if the job ends in "error", with the backend's jobError as the message.
-export function pollUntilRenderDone(id, { intervalMs = 2500, timeoutMs = 20 * 60 * 1000 } = {}) {
+// renderPreview/renderPreviewImage/finalizeProject above all just START a
+// background render job and return right away (see
+// backend/controllers/renderController.js — full video renders, and even the
+// single-frame preview-image grab, are too slow/risky to hold one HTTP
+// request open for on a slow/free-tier host). This polls GET /api/videos/:id
+// until the project's jobStatus leaves "rendering", then resolves with the
+// final project doc. Throws if the job ends in "error", with the backend's
+// jobError as the message. `onTick`, if given, is called with every polled
+// project doc (including while still "rendering") so a caller can read
+// `jobProgress` off it and drive a live progress bar rather than only finding
+// out once the whole job is finished.
+export function pollUntilRenderDone(id, { intervalMs = 2500, timeoutMs = 20 * 60 * 1000, onTick } = {}) {
   const startedAt = Date.now();
   return new Promise((resolve, reject) => {
     const tick = async () => {
       try {
         const project = await getProject(id);
+        onTick?.(project);
         if (project.jobStatus === "rendering") {
           if (Date.now() - startedAt > timeoutMs) {
             reject(new Error("Render is taking much longer than expected — check back later."));
