@@ -1,0 +1,8 @@
+{
+  "//": "nodemon by default watches EVERY file under this directory, including the runtime folders below — so every raw video upload, every ffmpeg-written temp overlay PNG, and every rendered/compressed output was triggering a full server restart mid-request. That restart killed in-flight uploads/renders and left the DB pointing at files that never finished being written (surfacing later as 'Raw video is no longer on the server'). None of these three ever contain source code, so they're safe to fully exclude from the watch.",
+  "ignore": [
+    "uploads/**",
+    "temp/**",
+    "outputs/**"
+  ]
+}
