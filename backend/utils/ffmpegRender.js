@@ -117,9 +117,29 @@ export async function renderReel({
       command.input(rawAudioPath);
       // input index shifts by one for each of the badge/tagline overlays that are also present
       const audioInputIdx = 2 + (badgeOverlayPngPath ? 1 : 0) + (taglineOverlayPngPath ? 1 : 0);
-      // -shortest trims to the shorter of video/audio so it never runs past the clip
-      outputOptions = outputOptions.concat(["-map", `${audioInputIdx}:a:0`, "-c:a", "aac", "-b:a", "192k", "-shortest"]);
+      // -shortest trims to the shorter of video/audio so it never runs past the clip.
+      // loudnorm brings the uploaded track up to a consistent, Reels-friendly
+      // loudness (-14 LUFS, the level Instagram/Spotify etc. normalize to)
+      // with a -1dBTP true-peak ceiling so it can't clip — previously there
+      // was no gain/normalization at all, so a quietly-recorded voiceover or
+      // music track played back noticeably quieter than the source file.
+      outputOptions = outputOptions.concat([
+        "-map",
+        `${audioInputIdx}:a:0`,
+        "-af",
+        "loudnorm=I=-14:TP=-1:LRA=11",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        "-shortest",
+      ]);
     } else {
+      // Original clip audio is optional (`0:a:0?` — some raw uploads have no
+      // audio track at all), so an unconditional `-af` here would error out
+      // on those with "no audio stream to filter". Left as-is; the loudness
+      // fix above covers the case the user actually reported (an uploaded
+      // voiceover/music track playing back too quiet).
       outputOptions = outputOptions.concat(["-map", "0:a:0?", "-c:a", "aac", "-b:a", "192k"]);
     }
 

@@ -1,5 +1,15 @@
 import React, { useEffect, useRef, useState } from "react";
-import { updateDesign, updateExtras, renderPreview, renderPreviewImage, finalizeProject, deleteRawVideo, assetUrl, getBrand } from "../api.js";
+import {
+  updateDesign,
+  updateExtras,
+  renderPreview,
+  renderPreviewImage,
+  finalizeProject,
+  deleteRawVideo,
+  pollUntilRenderDone,
+  assetUrl,
+  getBrand,
+} from "../api.js";
 
 const FRAME_STYLES = [
   { id: "gold-border", label: "Gold Border" },
@@ -96,14 +106,27 @@ export default function DesignEditor({ project: initialProject, onBack }) {
     }
   }
 
+  // The backend now renders in the background (see api.js's
+  // pollUntilRenderDone) rather than holding one HTTP request open for the
+  // whole encode — this turns a project's absolute on-disk output path
+  // (e.g. "/app/outputs/reel-xyz.mp4") back into the "/outputs/<file>" URL
+  // the frontend needs to actually load it.
+  function outputsUrl(absPath) {
+    if (!absPath) return null;
+    const filename = absPath.split(/[\\/]/).pop();
+    return assetUrl(`/outputs/${filename}`) + `?t=${Date.now()}`;
+  }
+
   async function handlePreview() {
     await persistDesign();
     setRendering(true);
     try {
-      const res = await renderPreview(project._id, previewQuality);
-      setPreviewUrl(assetUrl(res.previewUrl) + `?t=${Date.now()}`);
+      await renderPreview(project._id, previewQuality); // starts the background job
+      const finished = await pollUntilRenderDone(project._id); // waits for jobStatus to leave "rendering"
+      setProject(finished);
+      setPreviewUrl(outputsUrl(finished.previewOutputPath));
     } catch (err) {
-      alert(err?.response?.data?.error || "Render failed");
+      alert(err?.response?.data?.error || err.message || "Render failed");
     } finally {
       setRendering(false);
     }
@@ -157,11 +180,12 @@ export default function DesignEditor({ project: initialProject, onBack }) {
     await persistDesign();
     setFinalizing(true);
     try {
-      const res = await finalizeProject(project._id, finalQuality);
-      setFinalUrl(assetUrl(res.finalUrl) + `?t=${Date.now()}`);
-      setProject(res.video);
+      await finalizeProject(project._id, finalQuality); // starts the background job
+      const finished = await pollUntilRenderDone(project._id);
+      setProject(finished);
+      setFinalUrl(outputsUrl(finished.finalOutputPath));
     } catch (err) {
-      alert(err?.response?.data?.error || "Finalize failed");
+      alert(err?.response?.data?.error || err.message || "Finalize failed");
     } finally {
       setFinalizing(false);
     }
@@ -602,6 +626,11 @@ export default function DesignEditor({ project: initialProject, onBack }) {
               {previewImageLoading ? "Generating…" : "Preview as image (fast)"}
             </button>
           </div>
+          {rendering && (
+            <p style={{ fontSize: 12, color: "#9aa0aa", marginTop: 8 }}>
+              Rendering — this runs in the background and can take a few minutes; feel free to leave this open.
+            </p>
+          )}
           {previewImageUrl && (
             <div style={{ marginTop: 14 }}>
               <p style={{ fontSize: 12, color: "#9aa0aa", margin: "0 0 6px" }}>Static preview of the generated template:</p>
@@ -622,6 +651,11 @@ export default function DesignEditor({ project: initialProject, onBack }) {
           <button onClick={handleFinalize} disabled={finalizing} style={{ ...secondaryBtn, marginTop: 10 }}>
             {finalizing ? "Finalizing…" : "Finalize & export"}
           </button>
+          {finalizing && (
+            <p style={{ fontSize: 12, color: "#9aa0aa", marginTop: 8 }}>
+              Rendering — this runs in the background and can take a few minutes; feel free to leave this open.
+            </p>
+          )}
           {finalUrl && (
             <div style={{ marginTop: 14 }}>
               <p style={{ fontWeight: 700, color: "#7CFC9A" }}>✅ Final export ready</p>

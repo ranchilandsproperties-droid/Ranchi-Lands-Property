@@ -1,12 +1,16 @@
 import fs from "fs";
 import path from "path";
+import { fileURLToPath } from "url";
 import { v4 as uuid } from "uuid";
 import Video from "../models/Video.js";
 import { buildOverlayPng, buildBadgeOnlyPng, buildTaglineOnlyPng, TAGLINE_TARGET_Y } from "../utils/renderOverlay.js";
 import { renderReel, renderPreviewImage } from "../utils/ffmpegRender.js";
 
-const TEMP_DIR = path.resolve("temp");
-const OUTPUT_DIR = path.resolve("outputs");
+// Anchored to this file's directory rather than process.cwd() — same
+// cwd-independence fix as utils/renderOverlay.js and server.js.
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const TEMP_DIR = path.join(__dirname, "..", "temp");
+const OUTPUT_DIR = path.join(__dirname, "..", "outputs");
 for (const d of [TEMP_DIR, OUTPUT_DIR]) if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
 
 // Land-type badge reveal point, as a fraction of the clip's total duration.
@@ -47,30 +51,75 @@ async function runRender(doc, quality) {
   return outPath;
 }
 
-// Draft/preview render — raw source files are KEPT so the design stays editable.
+// Runs the actual render OFF the request/response cycle and records the
+// result on the document once it's done. This is what lets renderPreview /
+// finalizeAndCleanup below respond immediately instead of holding the HTTP
+// connection open for the whole encode — video rendering (node-canvas +
+// ffmpeg) routinely takes longer than a proxy's or Node's own default
+// request timeout allows, which is exactly what was causing renders to
+// "always disconnect" before finishing even though ffmpeg itself was fine.
+async function runRenderJob(docId, kind, quality) {
+  try {
+    const doc = await Video.findById(docId);
+    if (!doc) return; // project was deleted mid-render; nothing to update
+
+    const outPath = await runRender(doc, quality);
+
+    if (kind === "preview") {
+      if (doc.previewOutputPath && fs.existsSync(doc.previewOutputPath) && doc.previewOutputPath !== outPath) {
+        fs.unlink(doc.previewOutputPath, () => {});
+      }
+      await Video.findByIdAndUpdate(docId, {
+        previewOutputPath: outPath,
+        status: "rendered",
+        jobStatus: "done",
+        jobError: null,
+      });
+    } else {
+      await Video.findByIdAndUpdate(docId, {
+        finalOutputPath: outPath,
+        lastExportQuality: quality,
+        status: "finalized",
+        jobStatus: "done",
+        jobError: null,
+      });
+    }
+  } catch (err) {
+    console.error(`[render:${kind}] failed for ${docId}:`, err);
+    await Video.findByIdAndUpdate(docId, {
+      jobStatus: "error",
+      jobError: err.message || "Render failed",
+    }).catch(() => {});
+  }
+}
+
+// Draft/preview render — raw source files are KEPT so the design stays
+// editable. Starts the render in the background and returns right away;
+// poll GET /api/videos/:id and watch `jobStatus` ("rendering" -> "done" or
+// "error") to know when previewOutputPath is ready.
 export async function renderPreview(req, res) {
   try {
     const doc = await Video.findById(req.params.id);
     if (!doc) return res.status(404).json({ error: "Not found" });
     if (!doc.rawVideoPath || !fs.existsSync(doc.rawVideoPath)) {
-      return res.status(400).json({ error: "Raw video no longer on server (project already finalized)." });
+      return res.status(400).json({ error: "Raw video no longer on server." });
+    }
+    if (doc.jobStatus === "rendering") {
+      return res.status(409).json({ error: "A render is already in progress for this project." });
     }
 
     const quality = req.body?.quality || "standard"; // previews default to the fast tier
-    const outPath = await runRender(doc, quality);
-
-    // replace any previous preview file
-    if (doc.previewOutputPath && fs.existsSync(doc.previewOutputPath)) {
-      fs.unlink(doc.previewOutputPath, () => {});
-    }
-    doc.previewOutputPath = outPath;
-    doc.status = "rendered";
+    doc.jobStatus = "rendering";
+    doc.jobKind = "preview";
+    doc.jobError = null;
     await doc.save();
 
-    res.json({ message: "Preview rendered", previewUrl: `/outputs/${path.basename(outPath)}`, video: doc });
+    runRenderJob(doc._id, "preview", quality); // fire-and-forget on purpose
+
+    res.status(202).json({ message: "Preview render started", video: doc });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: "Render failed", details: err.message });
+    res.status(500).json({ error: "Could not start render", details: err.message });
   }
 }
 
@@ -117,6 +166,8 @@ export async function renderPreviewImageCtrl(req, res) {
 // finishes. Cleanup is a separate, explicit step (see deleteRawFiles below),
 // triggered only when the user presses "Delete source video" themselves
 // (e.g. after downloading and confirming the export looks right).
+// Same background-job pattern as renderPreview above — starts the render and
+// returns immediately; poll GET /api/videos/:id for jobStatus/finalOutputPath.
 export async function finalizeAndCleanup(req, res) {
   try {
     const doc = await Video.findById(req.params.id);
@@ -124,22 +175,22 @@ export async function finalizeAndCleanup(req, res) {
     if (!doc.rawVideoPath || !fs.existsSync(doc.rawVideoPath)) {
       return res.status(400).json({ error: "Raw video no longer on server (already deleted)." });
     }
+    if (doc.jobStatus === "rendering") {
+      return res.status(409).json({ error: "A render is already in progress for this project." });
+    }
 
     const quality = req.body?.quality || "high";
-    const outPath = await runRender(doc, quality);
-    doc.finalOutputPath = outPath;
-    doc.lastExportQuality = quality;
-    doc.status = "finalized";
+    doc.jobStatus = "rendering";
+    doc.jobKind = "finalize";
+    doc.jobError = null;
     await doc.save();
 
-    res.json({
-      message: "Finalized. Raw uploaded video/audio is still on the server — delete it manually when you're done.",
-      finalUrl: `/outputs/${path.basename(outPath)}`,
-      video: doc,
-    });
+    runRenderJob(doc._id, "finalize", quality); // fire-and-forget on purpose
+
+    res.status(202).json({ message: "Final export started", video: doc });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: "Finalize failed", details: err.message });
+    res.status(500).json({ error: "Could not start final export", details: err.message });
   }
 }
 
