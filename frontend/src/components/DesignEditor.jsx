@@ -342,27 +342,6 @@ export default function DesignEditor({ project: initialProject, onBack }) {
             </span>
             {project.landType}
           </div>
-          {/* moved beside the badge (not below it) so it doesn't collide with
-              the new bold top-of-frame location line that now sits just under
-              the badge — this label is only an editor annotation, never part
-              of the actual video */}
-          <div
-            style={{
-              position: "absolute",
-              right: 16,
-              top: 55,
-              fontSize: 8,
-              color: "#c9c9c9",
-              background: "rgba(0,0,0,0.55)",
-              padding: "2px 6px",
-              borderRadius: 6,
-              maxWidth: 90,
-              textAlign: "right",
-            }}
-          >
-            appears at 25% mark
-          </div>
-
           {design.elements.map((el) => {
             const isLocation = el.field === "location" || el.field === "locationDescriptive";
             const isArea = el.field === "area";

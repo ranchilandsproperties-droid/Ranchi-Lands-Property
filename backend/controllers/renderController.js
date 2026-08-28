@@ -3,7 +3,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { v4 as uuid } from "uuid";
 import Video from "../models/Video.js";
-import { buildOverlayPng, buildBadgeOnlyPng, buildTaglineOnlyPng, TAGLINE_TARGET_Y } from "../utils/renderOverlay.js";
+import { buildOverlayPng, buildTaglineOnlyPng, TAGLINE_TARGET_Y } from "../utils/renderOverlay.js";
 import { renderReel, renderPreviewImage } from "../utils/ffmpegRender.js";
 
 // Anchored to this file's directory rather than process.cwd() — same
@@ -13,20 +13,18 @@ const TEMP_DIR = path.join(__dirname, "..", "temp");
 const OUTPUT_DIR = path.join(__dirname, "..", "outputs");
 for (const d of [TEMP_DIR, OUTPUT_DIR]) if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
 
-// Land-type badge reveal point, as a fraction of the clip's total duration.
-// Kept as one constant so preview and finalize renders always agree.
-const BADGE_REVEAL_RATIO = 0.25;
-
+// Land-type badge is now baked directly into the main overlay (shown from
+// the very first frame, same as the title/area/price/location text) instead
+// of fading/revealing in partway through the clip. This is simpler and more
+// practical across every land type — a viewer scrolling Reels should see
+// what kind of land this is immediately, not 25% into the clip.
 async function runRender(doc, quality) {
   const overlayPath = path.join(TEMP_DIR, `overlay-${doc._id}-${uuid()}.png`);
-  const badgeOverlayPath = path.join(TEMP_DIR, `overlay-badge-${doc._id}-${uuid()}.png`);
   const taglineOverlayPath = path.join(TEMP_DIR, `overlay-tagline-${doc._id}-${uuid()}.png`);
-  // Main overlay excludes the badge AND the tagline — both are timed in
-  // separately below (badge: reveals partway through; tagline: animated
-  // slide in/hold/out) so they can't just be baked in as static pixels.
-  const [, , taglineMeta] = await Promise.all([
-    buildOverlayPng(doc, overlayPath, { includeBadge: false, includeTagline: false }),
-    buildBadgeOnlyPng(doc, badgeOverlayPath),
+  // Main overlay now includes the badge (visible from t=0); only the
+  // tagline stays timed in separately (animated slide in/hold/out).
+  const [, taglineMeta] = await Promise.all([
+    buildOverlayPng(doc, overlayPath, { includeBadge: true, includeTagline: false }),
     buildTaglineOnlyPng(taglineOverlayPath),
   ]);
 
@@ -35,8 +33,6 @@ async function runRender(doc, quality) {
     rawVideoPath: doc.rawVideoPath,
     rawAudioPath: doc.rawAudioPath,
     overlayPngPath: overlayPath,
-    badgeOverlayPngPath: badgeOverlayPath,
-    badgeRevealRatio: BADGE_REVEAL_RATIO,
     taglineOverlayPngPath: taglineOverlayPath,
     taglineWidth: taglineMeta.width,
     taglineHeight: taglineMeta.height,
@@ -46,7 +42,6 @@ async function runRender(doc, quality) {
   });
 
   fs.unlink(overlayPath, () => {}); // overlay PNGs are scratch files either way
-  fs.unlink(badgeOverlayPath, () => {});
   fs.unlink(taglineOverlayPath, () => {});
   return outPath;
 }

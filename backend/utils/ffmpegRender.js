@@ -81,12 +81,8 @@ function verifyRenderedAudio(outPath, { required }) {
  *    any portion of it: the clip is scaled to fit inside the frame, and any
  *    empty top/bottom (or side) space is filled with plain black — no blur/zoom
  *    fill — so the letterboxed area reads as a clean black bar.
- *  - Overlays the rasterized design PNG (frame border, text, footer, etc.) on top.
- *  - If `badgeOverlayPngPath` is supplied (a transparent PNG containing just the
- *    land-type badge), it's composited in separately with an ffmpeg `enable=`
- *    time gate so the badge only appears once the clip has played through
- *    `badgeRevealRatio` of its total length (default 25%), rather than being
- *    visible from the first frame.
+ *  - Overlays the rasterized design PNG (frame border, text, land-type badge,
+ *    footer, etc.) on top — all visible from the very first frame.
  *  - If audio was uploaded, replaces the clip's original audio with it (loudness-
  *    normalized in the SAME filter_complex graph as the video, not a bolted-on
  *    `-af`); else keeps the original audio untouched, if any.
@@ -101,8 +97,6 @@ export async function renderReel({
   rawVideoPath,
   rawAudioPath,
   overlayPngPath,
-  badgeOverlayPngPath,
-  badgeRevealRatio = 0.25,
   taglineOverlayPngPath,
   taglineWidth,
   taglineHeight,
@@ -118,11 +112,6 @@ export async function renderReel({
   // progress reporting below needs the total duration regardless of which
   // overlays are active, and the cost of one extra ffprobe is negligible.
   const duration = await getVideoDurationSeconds(rawVideoPath);
-
-  let revealAt = 0;
-  if (badgeOverlayPngPath) {
-    revealAt = +(duration * badgeRevealRatio).toFixed(2); // 0 if duration couldn't be probed
-  }
 
   let tagline = null;
   if (taglineOverlayPngPath) {
@@ -141,10 +130,9 @@ export async function renderReel({
 
   return new Promise((resolve, reject) => {
     const command = ffmpeg(rawVideoPath).input(overlayPngPath);
-    if (badgeOverlayPngPath) command.input(badgeOverlayPngPath);
     if (taglineOverlayPngPath) command.input(taglineOverlayPngPath);
 
-    const filterGraph = buildFrameFilter({ badge: !!badgeOverlayPngPath, revealAt, tagline });
+    const filterGraph = buildFrameFilter({ tagline });
 
     let outputOptions = [
       "-map",
@@ -181,22 +169,29 @@ export async function renderReel({
       const isWav = path.extname(rawAudioPath).toLowerCase() === ".wav";
       command.input(rawAudioPath);
       if (isWav) command.inputOptions(["-ignore_length", "1"]);
-      // input index shifts by one for each of the badge/tagline overlays that are also present
-      const audioInputIdx = 2 + (badgeOverlayPngPath ? 1 : 0) + (taglineOverlayPngPath ? 1 : 0);
+      // input index shifts by one for the tagline overlay, if also present
+      const audioInputIdx = 2 + (taglineOverlayPngPath ? 1 : 0);
       // loudnorm now lives IN the filter_complex graph (as its own independent
       // filtergraph node, [aout]) instead of a separate top-level `-af` flag.
       // Mixing `-filter_complex` (video) with `-af` (audio) on the same command
       // works most of the time, but the two options are applied by ffmpeg at
       // different stages and it's easy for them to silently disagree about
       // which audio input they're each looking at once more inputs get added
-      // (badge/tagline shift indices). Putting both graphs in one
+      // (the tagline shifts indices). Putting both graphs in one
       // filter_complex removes that ambiguity entirely — everything downstream
       // just maps named output pads ([vout]/[aout]).
       // -shortest trims to the shorter of video/audio so it never runs past the clip.
-      // Brings the uploaded track up to a consistent, Reels-friendly loudness
-      // (-14 LUFS, the level Instagram/Spotify etc. normalize to) with a
-      // -1dBTP true-peak ceiling so it can't clip.
-      filterGraph.push(`[${audioInputIdx}:a:0]loudnorm=I=-14:TP=-1:LRA=11[aout]`);
+      //
+      // dynaudnorm (not loudnorm) for the level-matching pass: loudnorm's
+      // single-pass "dynamic" mode needs several seconds of lookahead to
+      // measure true loudness before it can apply meaningful gain, so on the
+      // short voiceover clips typically uploaded here it was barely raising
+      // the level at all — the track technically existed in the output but
+      // was effectively inaudible. dynaudnorm normalizes frame-by-frame with
+      // no such warm-up requirement, so quiet phone/browser recordings
+      // reliably come up to an audible level even on a few-second clip.
+      // alimiter afterward is a hard ceiling so the boosted signal can never clip.
+      filterGraph.push(`[${audioInputIdx}:a:0]dynaudnorm=f=150:g=15:m=15,alimiter=limit=0.95[aout]`);
       outputOptions = outputOptions.concat(["-map", "[aout]", "-c:a", "aac", "-b:a", "192k", "-shortest"]);
     } else {
       // Original clip audio is optional (`0:a:0?` — some raw uploads have no
@@ -253,13 +248,11 @@ export async function renderReel({
 
 // Shared filter graph: fit the full source frame inside the 1080x1920 canvas
 // (no cropping) over a plain black background, then composite the design PNG
-// on top. `overlay=...:shortest=1` on the black-fill step matters because the
+// (which now includes the land-type badge, baked in and visible from the
+// first frame — same as the title/area/price/location text) on top.
+// `overlay=...:shortest=1` on the black-fill step matters because the
 // `color` source is otherwise infinite — shortest=1 makes the composited
 // stream end when the actual video (the shorter of the two) ends.
-//
-// When `badge` is true, the badge-only PNG is composited on top with
-// `enable='gte(t,revealAt)'`, so it stays invisible until output timestamp
-// `t` reaches `revealAt` seconds, then stays visible for the rest of the clip.
 //
 // When `tagline` is given, its banner PNG is composited last with an animated
 // `y` expression: it drops in from just above the frame during [0, slideIn],
@@ -269,7 +262,7 @@ export async function renderReel({
 // Returns a mutable array of filtergraph strings — renderReel above may push
 // an additional (independent) audio filtergraph node onto it before passing
 // the whole thing to a single `.complexFilter()` call.
-function buildFrameFilter({ badge = false, revealAt = 0, tagline = null } = {}) {
+function buildFrameFilter({ tagline = null } = {}) {
   const steps = [
     `color=c=black:s=${CANVAS_W}x${CANVAS_H}[bgblack]`,
     `[0:v]scale=${CANVAS_W}:${CANVAS_H}:force_original_aspect_ratio=decrease[fg]`,
@@ -283,13 +276,6 @@ function buildFrameFilter({ badge = false, revealAt = 0, tagline = null } = {}) 
   lastLabel = "withMain";
   nextInput += 1;
 
-  if (badge) {
-    const label = tagline ? "withBadge" : "vout";
-    steps.push(`[${lastLabel}][${nextInput}:v]overlay=0:0:enable='gte(t,${revealAt})'[${label}]`);
-    lastLabel = label;
-    nextInput += 1;
-  }
-
   if (tagline) {
     const { x, y, h, slideIn, holdEnd, duration } = tagline;
     const offscreenY = -h - 4;
@@ -299,8 +285,8 @@ function buildFrameFilter({ badge = false, revealAt = 0, tagline = null } = {}) 
       `if(lt(t,${holdEnd}),${y},` +
       `if(lt(t,${duration}),${y}+(${offscreenY}-${y})*((t-${holdEnd})/(${Math.max(duration - holdEnd, 0.001)})),${offscreenY})))`;
     steps.push(`[${lastLabel}][${nextInput}:v]overlay=x=${x}:y='${yExpr}':format=auto[vout]`);
-  } else if (lastLabel !== "vout") {
-    // rename final label to [vout] when neither extra layer changed it above
+  } else {
+    // rename final label to [vout] when no tagline layer changed it above
     steps[steps.length - 1] = steps[steps.length - 1].replace(`[${lastLabel}]`, "[vout]");
   }
 
