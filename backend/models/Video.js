@@ -5,9 +5,10 @@ import mongoose from "mongoose";
  *
  * Lifecycle:
  *  uploaded -> designing (user edits overlay/frame) -> rendered (preview mp4 made,
- *  raw source files still kept so design can change) -> finalized (final export made,
- *  raw uploaded video/audio DELETED from server per requirement, only the
- *  rendered output + design JSON remain for record/re-download).
+ *  raw source files still kept so design can change) -> finalized (final export
+ *  made; raw uploaded video/audio is still KEPT on the server at this point).
+ *  The raw video/audio is only removed when the user explicitly deletes it
+ *  (DELETE /api/videos/:id/raw), typically after downloading the final export.
  */
 const VideoSchema = new mongoose.Schema(
   {
@@ -38,8 +39,8 @@ const VideoSchema = new mongoose.Schema(
     additionalImagePath: { type: String, default: null }, // small supplementary image, shown bottom-left of the frame
 
     // ---- file bookkeeping ----
-    rawVideoPath: { type: String, default: null }, // deleted at finalize time
-    rawAudioPath: { type: String, default: null }, // deleted at finalize time (optional track)
+    rawVideoPath: { type: String, default: null }, // deleted only when the user explicitly requests it (DELETE .../raw)
+    rawAudioPath: { type: String, default: null }, // optional track; same manual-delete-only rule
     previewOutputPath: { type: String, default: null }, // draft render, can be re-rendered
     previewImagePath: { type: String, default: null }, // static image snapshot of the templated design
     finalOutputPath: { type: String, default: null }, // last finalized export

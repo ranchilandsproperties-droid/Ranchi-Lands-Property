@@ -2,9 +2,11 @@
 
 Upload a raw land video (+ optional audio), fill in land details, design a branded
 Instagram-Reels (1080×1920, 9:16) promo frame over it with editable text/badges,
-render it with FFmpeg at your choice of quality, and — once you finalize — the
-raw uploaded video/audio is deleted from the server, leaving only the design
-JSON + finished MP4.
+render it with FFmpeg at your choice of quality. Finalizing produces the
+export MP4, but the raw uploaded video/audio is **not** deleted automatically —
+it stays on the server until you explicitly delete it (a "Delete source
+video" button in the editor), so you have a chance to download and check the
+export first.
 
 ## How it works
 
@@ -74,9 +76,13 @@ only changes compression, not how much of the frame is shown.
 - `POST /api/videos/:id/preview { quality }` renders a draft MP4 — raw files
   are **kept** so you can keep editing and re-render.
 - `POST /api/videos/:id/finalize { quality }` renders once more from the
-  latest design at the chosen quality, then **deletes** `rawVideoPath` /
-  `rawAudioPath` from disk and clears those fields in Mongo. Only the finished
-  reel (`outputs/reel-*.mp4`) and the design record remain.
+  latest design at the chosen quality. The raw video/audio is **kept** —
+  finalizing does not delete anything.
+- `DELETE /api/videos/:id/raw` explicitly deletes `rawVideoPath` /
+  `rawAudioPath` from disk and clears those fields in Mongo. This is the only
+  thing that ever removes the raw upload, and it only runs when the user
+  presses "Delete source video" in the editor (typically after downloading
+  the finished export).
 
 ## Deploying — Render (backend) + Vercel (frontend), free tiers
 
@@ -100,9 +106,10 @@ supports Docker web services) that installs both.
 4. Deploy. Note: the free tier's disk is **ephemeral** — files in
    `uploads/`/`outputs/` don't survive a redeploy or a spin-down/spin-up
    cycle, and the service sleeps after inactivity (first request after
-   sleeping will be slow). That's fine for this app's flow since `finalize()`
-   already deletes the raw upload once you're done, but download your
-   finalized reels rather than relying on the server to keep them around.
+   sleeping will be slow). Since the raw upload is no longer deleted
+   automatically, make a habit of downloading your finalized reels (and using
+   the "Delete source video" button once you're done) rather than relying on
+   the server to keep files around.
 
 ### Frontend → Vercel
 1. On Vercel: New Project → same repo → set **Root Directory** to `frontend`.

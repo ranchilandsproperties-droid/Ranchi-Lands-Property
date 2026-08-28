@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { updateDesign, updateExtras, renderPreview, renderPreviewImage, finalizeProject, assetUrl, getBrand } from "../api.js";
+import { updateDesign, updateExtras, renderPreview, renderPreviewImage, finalizeProject, deleteRawVideo, assetUrl, getBrand } from "../api.js";
 
 const FRAME_STYLES = [
   { id: "gold-border", label: "Gold Border" },
@@ -37,6 +37,7 @@ export default function DesignEditor({ project: initialProject, onBack }) {
   const [saving, setSaving] = useState(false);
   const [rendering, setRendering] = useState(false);
   const [finalizing, setFinalizing] = useState(false);
+  const [deletingRaw, setDeletingRaw] = useState(false);
   const [previewUrl, setPreviewUrl] = useState(null);
   const [finalUrl, setFinalUrl] = useState(null);
   const [previewQuality, setPreviewQuality] = useState("standard");
@@ -153,10 +154,6 @@ export default function DesignEditor({ project: initialProject, onBack }) {
   }
 
   async function handleFinalize() {
-    const ok = window.confirm(
-      "This renders the final reel, then permanently deletes the raw uploaded video/audio from the server. Continue?"
-    );
-    if (!ok) return;
     await persistDesign();
     setFinalizing(true);
     try {
@@ -167,6 +164,25 @@ export default function DesignEditor({ project: initialProject, onBack }) {
       alert(err?.response?.data?.error || "Finalize failed");
     } finally {
       setFinalizing(false);
+    }
+  }
+
+  // Explicit, user-triggered cleanup — only runs when the button below is
+  // pressed. The raw video/audio is never deleted automatically; the user
+  // should download and confirm the export first.
+  async function handleDeleteRawVideo() {
+    const ok = window.confirm(
+      "Delete the raw uploaded video/audio from the server? Make sure you've downloaded the final export first — this can't be undone."
+    );
+    if (!ok) return;
+    setDeletingRaw(true);
+    try {
+      const res = await deleteRawVideo(project._id);
+      setProject(res.video);
+    } catch (err) {
+      alert(err?.response?.data?.error || "Delete failed");
+    } finally {
+      setDeletingRaw(false);
     }
   }
 
@@ -603,12 +619,12 @@ export default function DesignEditor({ project: initialProject, onBack }) {
         <div style={{ border: "1px solid #7a2b2b", borderRadius: 10, padding: 14 }}>
           <p style={{ margin: "0 0 8px", fontWeight: 700 }}>Final export</p>
           <QualityPicker value={finalQuality} onChange={setFinalQuality} />
-          <button onClick={handleFinalize} disabled={finalizing} style={{ ...dangerBtn, marginTop: 10 }}>
-            {finalizing ? "Finalizing…" : "Finalize & export (deletes raw upload)"}
+          <button onClick={handleFinalize} disabled={finalizing} style={{ ...secondaryBtn, marginTop: 10 }}>
+            {finalizing ? "Finalizing…" : "Finalize & export"}
           </button>
           {finalUrl && (
             <div style={{ marginTop: 14 }}>
-              <p style={{ fontWeight: 700, color: "#7CFC9A" }}>✅ Final export ready — raw video deleted from server</p>
+              <p style={{ fontWeight: 700, color: "#7CFC9A" }}>✅ Final export ready</p>
               <video src={finalUrl} controls style={{ width: 260, borderRadius: 8 }} />
               <div>
                 <a href={finalUrl} download style={{ color: "#D4AF37" }}>
@@ -616,6 +632,24 @@ export default function DesignEditor({ project: initialProject, onBack }) {
                 </a>
               </div>
             </div>
+          )}
+
+          {/* Raw video/audio is kept on the server until the user deletes it
+              themselves — this button is the only thing that ever removes it. */}
+          {project.rawVideoPath ? (
+            <div style={{ marginTop: 16, paddingTop: 14, borderTop: "1px solid #2b2f3a" }}>
+              <p style={{ margin: "0 0 8px", fontSize: 13, color: "#9aa0aa" }}>
+                Raw uploaded video/audio is still on the server. Once you've downloaded the export
+                and are done, you can delete it to free up space.
+              </p>
+              <button onClick={handleDeleteRawVideo} disabled={deletingRaw} style={dangerBtn}>
+                {deletingRaw ? "Deleting…" : "Delete source video"}
+              </button>
+            </div>
+          ) : (
+            <p style={{ marginTop: 16, fontSize: 13, color: "#9aa0aa" }}>
+              Raw uploaded video/audio has been deleted from the server.
+            </p>
           )}
         </div>
       </div>

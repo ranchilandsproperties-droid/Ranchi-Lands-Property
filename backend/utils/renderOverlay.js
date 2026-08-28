@@ -1,6 +1,7 @@
 import { createCanvas, loadImage, registerFont } from "canvas";
 import fs from "fs";
 import path from "path";
+import { fileURLToPath } from "url";
 import { BRAND } from "../config/brand.js";
 
 // Reels canvas size
@@ -15,14 +16,49 @@ const FOOTER_STRIP_H = 150;
 // "additional text" note set — see drawAdditionalTextStrip() below.
 const ADDITIONAL_TEXT_STRIP_H = 64;
 
-const ASSETS_DIR = path.resolve("assets");
+// Bottom edge that the decorative frame (border strokes, corner ornaments,
+// glass panel) must stop above. Previously the frame was drawn all the way
+// to CANVAS_H - margin, which lands well inside the footer strip
+// (CANVAS_H - FOOTER_STRIP_H to CANVAS_H) — the border line and corner
+// brackets ended up drawn directly across the footer's contact-number/email
+// text, reading as a stray gold/white line cutting through it. Everything
+// decorative now stops at FRAME_BOTTOM instead, a small gap above the footer.
+const FRAME_BOTTOM_GAP = 10;
+const FRAME_BOTTOM = CANVAS_H - FOOTER_STRIP_H - FRAME_BOTTOM_GAP;
+
+// Resolved relative to THIS FILE's location (backend/utils/), not the
+// process's current working directory. `path.resolve("assets")` (the old
+// version of this line) depends on whatever directory the Node process
+// happens to be launched from — correct when running `node server.js`
+// straight from `backend/`, but silently wrong (pointing at a nonexistent
+// folder, so the logo file is never found) under any other launch setup
+// (a root-level dev script, a process manager with a different cwd, etc.).
+// Anchoring to import.meta.url makes this work the same regardless of cwd.
+const ASSETS_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "assets");
 const LOGO_PATH = path.join(ASSETS_DIR, "brand-logo.jpg");
 
 async function loadBrandLogo() {
-  if (!fs.existsSync(LOGO_PATH)) return null;
+  if (!fs.existsSync(LOGO_PATH)) {
+    console.warn(`[renderOverlay] Brand logo not found at ${LOGO_PATH} — footer/watermark will fall back to a plain initial.`);
+    return null;
+  }
   try {
-    return await loadImage(LOGO_PATH);
-  } catch {
+    // Load via a Buffer rather than handing loadImage() the raw file path.
+    // node-canvas's path-based loader does its own (stricter) sniffing of
+    // the file and can silently fail on some JPEGs/platforms; feeding it
+    // the already-read bytes is the more reliable route and is what was
+    // actually failing here — the JPEG loaded fine for the plain <img> tag
+    // in the browser (which doesn't go through node-canvas at all) but
+    // wasn't decoding on the server, so every render fell back to the
+    // gold-circle-with-initial placeholder instead of the real logo.
+    const buffer = fs.readFileSync(LOGO_PATH);
+    return await loadImage(buffer);
+  } catch (err) {
+    // Previously this failure was swallowed with no log at all, which is
+    // exactly why the missing logo went unnoticed until someone checked a
+    // rendered video closely — always log it now so it's visible in the
+    // server console/logs if it ever happens again.
+    console.warn(`[renderOverlay] Failed to load brand logo from ${LOGO_PATH}:`, err.message);
     return null;
   }
 }
@@ -241,6 +277,11 @@ function drawVignette(ctx) {
 function drawCornerOrnaments(ctx, accent) {
   ctx.save();
   const inset = 52;
+  // Bottom corners are inset up from FRAME_BOTTOM (the same 24px the top
+  // corners sit inward of the top border line: inset(52) - margin(28) = 24),
+  // not from CANVAS_H, so they land just above the footer instead of on top
+  // of its text/icons.
+  const bottomInset = FRAME_BOTTOM - 24;
   const len = 46;
   ctx.strokeStyle = accent;
   ctx.lineWidth = 3;
@@ -248,8 +289,8 @@ function drawCornerOrnaments(ctx, accent) {
   const corners = [
     [inset, inset, 1, 1],
     [CANVAS_W - inset, inset, -1, 1],
-    [inset, CANVAS_H - inset, 1, -1],
-    [CANVAS_W - inset, CANVAS_H - inset, -1, -1],
+    [inset, bottomInset, 1, -1],
+    [CANVAS_W - inset, bottomInset, -1, -1],
   ];
   for (const [x, y, dx, dy] of corners) {
     ctx.beginPath();
@@ -295,26 +336,34 @@ function drawFrame(ctx, style, accent) {
       outerGrad.addColorStop(1, PALETTE.goldDeep);
       ctx.strokeStyle = outerGrad;
       ctx.lineWidth = 10;
-      ctx.strokeRect(margin, margin, CANVAS_W - margin * 2, CANVAS_H - margin * 2);
+      // Bottom edge stops at FRAME_BOTTOM (just above the footer strip)
+      // instead of CANVAS_H - margin, which used to run the gold line
+      // straight through the footer's contact/email text.
+      ctx.strokeRect(margin, margin, CANVAS_W - margin * 2, FRAME_BOTTOM - margin);
       ctx.strokeStyle = "rgba(255,255,255,0.85)";
       ctx.lineWidth = 2;
-      ctx.strokeRect(margin + 16, margin + 16, CANVAS_W - (margin + 16) * 2, CANVAS_H - (margin + 16) * 2);
+      ctx.strokeRect(margin + 16, margin + 16, CANVAS_W - (margin + 16) * 2, FRAME_BOTTOM - 16 - (margin + 16));
       break;
     }
     case "minimal-white":
       ctx.strokeStyle = "#FFFFFF";
       ctx.lineWidth = 6;
-      ctx.strokeRect(margin, margin, CANVAS_W - margin * 2, CANVAS_H - margin * 2);
+      // Same FRAME_BOTTOM fix as gold-border above.
+      ctx.strokeRect(margin, margin, CANVAS_W - margin * 2, FRAME_BOTTOM - margin);
       break;
     case "glass": {
-      const glassGrad = ctx.createLinearGradient(0, CANVAS_H - 420, 0, CANVAS_H);
+      // Panel now sits with its bottom edge at FRAME_BOTTOM rather than
+      // CANVAS_H, so it no longer sits underneath (and its stroke no longer
+      // shows through) the footer.
+      const glassTop = FRAME_BOTTOM - 420;
+      const glassGrad = ctx.createLinearGradient(0, glassTop, 0, FRAME_BOTTOM);
       glassGrad.addColorStop(0, "rgba(255,255,255,0)");
       glassGrad.addColorStop(1, "rgba(255,255,255,0.12)");
       ctx.fillStyle = glassGrad;
-      ctx.fillRect(0, CANVAS_H - 420, CANVAS_W, 420);
+      ctx.fillRect(0, glassTop, CANVAS_W, 420);
       ctx.strokeStyle = "rgba(255,255,255,0.25)";
       ctx.lineWidth = 1;
-      ctx.strokeRect(0.5, CANVAS_H - 420, CANVAS_W - 1, 419);
+      ctx.strokeRect(0.5, glassTop, CANVAS_W - 1, FRAME_BOTTOM - glassTop - 1);
       break;
     }
     case "none":

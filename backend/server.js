@@ -3,6 +3,7 @@ import cors from "cors";
 import dotenv from "dotenv";
 import mongoose from "mongoose";
 import path from "path";
+import { fileURLToPath } from "url";
 
 import uploadRoutes from "./routes/upload.js";
 import renderRoutes from "./routes/render.js";
@@ -19,11 +20,17 @@ const allowedOrigins = process.env.CLIENT_ORIGIN ? process.env.CLIENT_ORIGIN.spl
 app.use(cors({ origin: allowedOrigins }));
 app.use(express.json());
 
+// Anchored to this file's own directory rather than process.cwd() so static
+// serving always points at backend/{outputs,uploads,assets} regardless of
+// where/how the process was launched from (see the same fix in
+// utils/renderOverlay.js for why cwd-relative paths were unreliable here).
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
 // Serve finished reels + (for preview during editing) raw uploads statically
-app.use("/outputs", express.static(path.resolve("outputs")));
-app.use("/uploads", express.static(path.resolve("uploads")));
+app.use("/outputs", express.static(path.join(__dirname, "outputs")));
+app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 // Fixed brand assets (logo) — same file used in every render's footer
-app.use("/assets", express.static(path.resolve("assets")));
+app.use("/assets", express.static(path.join(__dirname, "assets")));
 
 app.use("/api/videos", uploadRoutes);
 app.use("/api/videos", renderRoutes);

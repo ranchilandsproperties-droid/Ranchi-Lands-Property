@@ -28,6 +28,10 @@ export const renderPreviewImage = (id) => api.post(`/videos/${id}/preview-image`
 
 export const finalizeProject = (id, quality) => api.post(`/videos/${id}/finalize`, { quality }).then((r) => r.data);
 
+// Explicit cleanup — deletes the raw uploaded video/audio from the server.
+// Never called automatically; only from a user-pressed "Delete source video" button.
+export const deleteRawVideo = (id) => api.delete(`/videos/${id}/raw`).then((r) => r.data);
+
 // Fixed footer config (company name, enquiry numbers, social handles, logo) —
 // same for every video, read-only from the frontend's point of view.
 export const getBrand = () => api.get(`/brand`).then((r) => r.data);

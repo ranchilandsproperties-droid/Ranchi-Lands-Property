@@ -111,26 +111,52 @@ export async function renderPreviewImageCtrl(req, res) {
   }
 }
 
-// Final export — renders once more from the latest design, THEN deletes the
-// raw uploaded video/audio from the server, per the requirement that source
-// files must not linger after the job is done. Only the finished reel + the
-// design JSON remain, so the record and the output stay recoverable/re-downloadable
-// even though the raw upload is gone.
+// Final export — renders once more from the latest design. The raw uploaded
+// video/audio is intentionally KEPT on the server after this — the user may
+// still want to re-render, and shouldn't lose the source the moment export
+// finishes. Cleanup is a separate, explicit step (see deleteRawFiles below),
+// triggered only when the user presses "Delete source video" themselves
+// (e.g. after downloading and confirming the export looks right).
 export async function finalizeAndCleanup(req, res) {
   try {
     const doc = await Video.findById(req.params.id);
     if (!doc) return res.status(404).json({ error: "Not found" });
     if (!doc.rawVideoPath || !fs.existsSync(doc.rawVideoPath)) {
-      return res.status(400).json({ error: "Already finalized." });
+      return res.status(400).json({ error: "Raw video no longer on server (already deleted)." });
     }
 
     const quality = req.body?.quality || "high";
     const outPath = await runRender(doc, quality);
     doc.finalOutputPath = outPath;
     doc.lastExportQuality = quality;
+    doc.status = "finalized";
+    await doc.save();
 
-    // ---- cleanup: delete raw uploaded video & audio from the server ----
+    res.json({
+      message: "Finalized. Raw uploaded video/audio is still on the server — delete it manually when you're done.",
+      finalUrl: `/outputs/${path.basename(outPath)}`,
+      video: doc,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Finalize failed", details: err.message });
+  }
+}
+
+// Explicit, user-triggered cleanup — deletes the raw uploaded video/audio
+// from disk and clears those fields in Mongo. Only the finished reel(s) and
+// the design record remain afterward. Called from a dedicated "Delete source
+// video" button on the frontend; never invoked automatically.
+export async function deleteRawFiles(req, res) {
+  try {
+    const doc = await Video.findById(req.params.id);
+    if (!doc) return res.status(404).json({ error: "Not found" });
+
     const toDelete = [doc.rawVideoPath, doc.rawAudioPath].filter(Boolean);
+    if (toDelete.length === 0) {
+      return res.status(400).json({ error: "No raw video/audio on server to delete." });
+    }
+
     for (const p of toDelete) {
       fs.unlink(p, (err) => {
         if (err) console.warn("Could not delete", p, err.message);
@@ -138,16 +164,11 @@ export async function finalizeAndCleanup(req, res) {
     }
     doc.rawVideoPath = null;
     doc.rawAudioPath = null;
-    doc.status = "finalized";
     await doc.save();
 
-    res.json({
-      message: "Finalized. Raw uploaded video/audio deleted from server.",
-      finalUrl: `/outputs/${path.basename(outPath)}`,
-      video: doc,
-    });
+    res.json({ message: "Raw uploaded video/audio deleted from server.", video: doc });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: "Finalize failed", details: err.message });
+    res.status(500).json({ error: "Delete failed", details: err.message });
   }
 }
