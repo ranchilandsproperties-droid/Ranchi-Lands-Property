@@ -1,5 +1,7 @@
 import fs from "fs";
+import path from "path";
 import Video from "../models/Video.js";
+import { compressRawUpload } from "../utils/ffmpegRender.js";
 
 const DEFAULT_ELEMENTS = [
   // A prominent, bold, icon-led SHORT location line at the TOP of the frame,
@@ -58,6 +60,24 @@ export async function createVideoProject(req, res) {
     const audioFile = req.files.audio?.[0] || null;
     const additionalImageFile = req.files.additionalImage?.[0] || null; // optional, used only when supplied
 
+    // Compress the raw upload before it's ever persisted as rawVideoPath —
+    // shrinks disk usage right away and lightens every later preview/finalize
+    // render (see compressRawUpload's doc comment). Non-fatal: if it fails
+    // for any reason, fall back to the original upload untouched rather than
+    // blocking the whole upload over it.
+    let rawVideoPath = videoFile.path;
+    try {
+      const compressedPath = path.join(
+        path.dirname(videoFile.path),
+        `${path.basename(videoFile.path, path.extname(videoFile.path))}-compressed.mp4`
+      );
+      await compressRawUpload(videoFile.path, compressedPath);
+      fs.unlink(videoFile.path, () => {}); // drop the larger original once the compressed copy exists
+      rawVideoPath = compressedPath;
+    } catch (err) {
+      console.warn("Raw video compression failed, keeping original upload:", err.message);
+    }
+
     const doc = await Video.create({
       title,
       description,
@@ -71,7 +91,7 @@ export async function createVideoProject(req, res) {
       ownerOrAgentName,
       additionalText: additionalText || "",
       additionalImagePath: additionalImageFile ? additionalImageFile.path : null,
-      rawVideoPath: videoFile.path,
+      rawVideoPath,
       rawAudioPath: audioFile ? audioFile.path : null,
       status: "designing",
       design: { frameStyle: "gold-border", accentColor: "#D4AF37", backgroundOverlay: "rgba(0,0,0,0.25)", elements: DEFAULT_ELEMENTS },

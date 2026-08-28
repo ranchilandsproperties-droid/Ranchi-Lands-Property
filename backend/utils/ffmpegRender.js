@@ -14,6 +14,62 @@ export const QUALITY_PRESETS = {
   ultra: { crf: 15, preset: "slow", maxrate: "12000k", bufsize: "24000k", label: "Ultra (best detail, slower render, larger file)" },
 };
 
+/**
+ * compressRawUpload
+ *  - Re-encodes a just-uploaded raw video down to a reasonable storage size
+ *    BEFORE it's ever saved as `rawVideoPath` on the doc. Phone/drone
+ *    footage routinely comes in at 15-40 Mbps and well above 1920px on a
+ *    side — none of which is needed here, since the final export is always
+ *    fit into a fixed 1080x1920 canvas anyway.
+ *  - Caps resolution at 1920px on the longer side (never upscales — the
+ *    scale filter is a no-op if the source is already smaller) and
+ *    re-encodes at a moderate CRF, which typically shrinks phone-recorded
+ *    clips by 70-90% with no visible quality loss at the sizes this app
+ *    actually displays them at.
+ *  - Smaller raw files also mean every later preview/finalize render has
+ *    less data to decode and hold in memory, which lowers the chance of an
+ *    OOM-triggered crash (and the restart-wiped-disk data loss that follows
+ *    one) on memory-constrained hosts — though it doesn't by itself protect
+ *    against a redeploy or planned restart, which still needs persistent/
+ *    external storage (see the note in the render pipeline).
+ *  - Resolves with `outPath` on success. Callers should treat failure as
+ *    non-fatal and fall back to keeping the original upload — a corrupt or
+ *    unusual source shouldn't block the upload outright.
+ */
+export function compressRawUpload(inputPath, outPath) {
+  return new Promise((resolve, reject) => {
+    let stderrTail = "";
+    ffmpeg(inputPath)
+      .videoFilters("scale='min(1920,iw)':'min(1920,ih)':force_original_aspect_ratio=decrease")
+      .outputOptions([
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "23",
+        "-pix_fmt",
+        "yuv420p",
+        "-movflags",
+        "+faststart",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
+      ])
+      .on("start", (cmd) => console.log("Upload compression FFmpeg started:", cmd))
+      .on("stderr", (line) => {
+        stderrTail = (stderrTail + "\n" + line).slice(-2000);
+      })
+      .on("error", (err) => {
+        if (stderrTail.trim()) console.error("[compress stderr]", stderrTail.trim());
+        reject(err);
+      })
+      .on("end", () => resolve(outPath))
+      .save(outPath);
+  });
+}
+
 // Probes a video file's duration (seconds) via ffprobe. Resolves to 0 on any
 // failure rather than rejecting — worst case the badge just shows from the
 // start instead of blocking the whole render over a probe hiccup. Now always
