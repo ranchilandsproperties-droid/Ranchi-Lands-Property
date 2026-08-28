@@ -1,4 +1,5 @@
 import ffmpeg from "fluent-ffmpeg";
+import path from "path";
 import { CANVAS_W, CANVAS_H, taglineX } from "./renderOverlay.js";
 
 if (process.env.FFMPEG_PATH) ffmpeg.setFfmpegPath(process.env.FFMPEG_PATH);
@@ -15,7 +16,9 @@ export const QUALITY_PRESETS = {
 
 // Probes a video file's duration (seconds) via ffprobe. Resolves to 0 on any
 // failure rather than rejecting — worst case the badge just shows from the
-// start instead of blocking the whole render over a probe hiccup.
+// start instead of blocking the whole render over a probe hiccup. Now always
+// called from renderReel (previously only when a badge/tagline was present)
+// since progress reporting needs it too regardless of which overlays are on.
 function getVideoDurationSeconds(filePath) {
   return new Promise((resolve) => {
     ffmpeg.ffprobe(filePath, (err, data) => {
@@ -25,19 +28,49 @@ function getVideoDurationSeconds(filePath) {
   });
 }
 
-// Checks whether a rendered file actually contains a usable audio stream
-// (present AND with a real, non-zero duration). Used as a safety net right
-// after a render that was supposed to include audio — without this, a
-// silently-empty/zero-length audio track (e.g. a malformed source WAV, or a
-// filtergraph mistake) would produce a video that *looks* successful but
-// plays with no sound, with nothing in the logs pointing at why.
-function probeHasAudio(filePath) {
-  return new Promise((resolve) => {
-    ffmpeg.ffprobe(filePath, (err, data) => {
-      if (err) return resolve(false);
+// Turns an ffmpeg timemark ("00:01:23.45") into seconds. Returns 0 on anything
+// unparseable rather than throwing — progress reporting is best-effort.
+function timemarkToSeconds(timemark) {
+  if (!timemark) return 0;
+  const parts = String(timemark).split(":");
+  if (parts.length !== 3) return 0;
+  const [h, m, s] = parts.map(parseFloat);
+  if (![h, m, s].every(Number.isFinite)) return 0;
+  return h * 3600 + m * 60 + s;
+}
+
+// Post-render safety net: confirms the file ffmpeg just produced actually has
+// a usable audio track. This exists because a silently-dropped `-map`/filter
+// mismatch (wrong input index, a typo'd filter label, etc.) previously could
+// still exit ffmpeg with code 0 and a "finished" file that plays back with no
+// sound at all — nothing upstream would have caught that. When the caller
+// explicitly supplied a replacement audio track we treat a missing/empty
+// audio stream as a hard failure; when audio was only carried through
+// optionally from the original clip (which may have had none to begin with)
+// we just warn, since "no audio" can be entirely legitimate there.
+function verifyRenderedAudio(outPath, { required }) {
+  return new Promise((resolve, reject) => {
+    ffmpeg.ffprobe(outPath, (err, data) => {
+      if (err) {
+        // Can't even probe the file we just wrote — treat that as a failure
+        // regardless of whether audio was required, since something's wrong.
+        return reject(new Error(`Post-render verification failed: could not probe output (${err.message})`));
+      }
       const audioStream = (data?.streams || []).find((s) => s.codec_type === "audio");
-      const dur = parseFloat(audioStream?.duration ?? data?.format?.duration);
-      resolve(Boolean(audioStream) && Number.isFinite(dur) && dur > 0.1);
+      const audioDuration = parseFloat(audioStream?.duration ?? data?.format?.duration);
+      const hasUsableAudio = !!audioStream && (!Number.isFinite(audioDuration) || audioDuration > 0);
+
+      if (!hasUsableAudio && required) {
+        return reject(
+          new Error(
+            "Post-render verification failed: the rendered file has no usable audio track even though a replacement audio file was supplied."
+          )
+        );
+      }
+      if (!hasUsableAudio) {
+        console.warn(`[render] output ${outPath} has no audio stream (source clip likely had none) — continuing.`);
+      }
+      resolve();
     });
   });
 }
@@ -54,9 +87,13 @@ function probeHasAudio(filePath) {
  *    time gate so the badge only appears once the clip has played through
  *    `badgeRevealRatio` of its total length (default 25%), rather than being
  *    visible from the first frame.
- *  - If audio was uploaded, replaces the clip's original audio with it; else
- *    keeps the original audio.
+ *  - If audio was uploaded, replaces the clip's original audio with it (loudness-
+ *    normalized in the SAME filter_complex graph as the video, not a bolted-on
+ *    `-af`); else keeps the original audio untouched, if any.
  *  - `quality` selects one of QUALITY_PRESETS to control encode CRF/bitrate.
+ *  - `onProgress`, if given, is called with `{ percent, seconds }` as ffmpeg
+ *    reports progress (percent is 0-99 while encoding; caller is responsible
+ *    for treating completion itself as 100).
  *
  * Returns a Promise that resolves with outPath when done.
  */
@@ -73,15 +110,13 @@ export async function renderReel({
   taglineSlideSeconds = 0.9,
   outPath,
   quality = "high",
-  onProgress, // optional (percent: number) => void, 0-100
+  onProgress,
 }) {
   const q = QUALITY_PRESETS[quality] || QUALITY_PRESETS.high;
 
-  // Always probed now (previously only when a badge/tagline needed it) so
-  // there's a known total duration to compute a real progress percentage
-  // against — ffmpeg's own `progress` event doesn't reliably include
-  // `percent` for every input, but always includes `timemark`, which we can
-  // turn into a percentage ourselves once we know how long the clip is.
+  // Always probed now (previously only when a badge/tagline was present) —
+  // progress reporting below needs the total duration regardless of which
+  // overlays are active, and the cost of one extra ffprobe is negligible.
   const duration = await getVideoDurationSeconds(rawVideoPath);
 
   let revealAt = 0;
@@ -109,7 +144,7 @@ export async function renderReel({
     if (badgeOverlayPngPath) command.input(badgeOverlayPngPath);
     if (taglineOverlayPngPath) command.input(taglineOverlayPngPath);
 
-    const filterSteps = buildFrameFilter({ badge: !!badgeOverlayPngPath, revealAt, tagline });
+    const filterGraph = buildFrameFilter({ badge: !!badgeOverlayPngPath, revealAt, tagline });
 
     let outputOptions = [
       "-map",
@@ -131,55 +166,86 @@ export async function renderReel({
     ];
 
     if (rawAudioPath) {
+      // Browser/phone-recorded WAV files very often ship with a broken or
+      // "streaming" header — the RIFF/data chunk declares a size of 0 (or
+      // some other wrong value) because the recorder didn't know the final
+      // length up front. ffmpeg's WAV demuxer trusts that declared size by
+      // default, so it can end up reading almost none of the actual audio —
+      // which then shows up downstream as "the render finished but there's
+      // no sound", not as an ffmpeg error, since nothing actually failed.
+      // `-ignore_length 1` tells the WAV demuxer to read to the real end of
+      // the file instead of trusting the (possibly bogus) header value. Only
+      // meaningful for .wav specifically — it isn't a recognized option for
+      // other demuxers, so it's gated on the extension rather than applied
+      // unconditionally (which would hard-error on an mp3/m4a/webm upload).
+      const isWav = path.extname(rawAudioPath).toLowerCase() === ".wav";
       command.input(rawAudioPath);
+      if (isWav) command.inputOptions(["-ignore_length", "1"]);
       // input index shifts by one for each of the badge/tagline overlays that are also present
       const audioInputIdx = 2 + (badgeOverlayPngPath ? 1 : 0) + (taglineOverlayPngPath ? 1 : 0);
-      // loudnorm brings the uploaded track up to a consistent, Reels-friendly
-      // loudness (-14 LUFS, the level Instagram/Spotify etc. normalize to)
-      // with a -1dBTP true-peak ceiling so it can't clip. This now lives IN
-      // the same -filter_complex graph as the video (labeled [aout]) rather
-      // than as a separate -af alongside -map — mixing an explicit -map with
-      // a simple -af on a command that already has -filter_complex is a
-      // known source of ffmpeg quietly producing an empty/silent audio
-      // stream, which is what was actually causing "no audio at all" rather
-      // than just quiet audio. Folding it into the complex graph removes
-      // that ambiguity entirely.
-      filterSteps.push(`[${audioInputIdx}:a:0]loudnorm=I=-14:TP=-1:LRA=11[aout]`);
+      // loudnorm now lives IN the filter_complex graph (as its own independent
+      // filtergraph node, [aout]) instead of a separate top-level `-af` flag.
+      // Mixing `-filter_complex` (video) with `-af` (audio) on the same command
+      // works most of the time, but the two options are applied by ffmpeg at
+      // different stages and it's easy for them to silently disagree about
+      // which audio input they're each looking at once more inputs get added
+      // (badge/tagline shift indices). Putting both graphs in one
+      // filter_complex removes that ambiguity entirely — everything downstream
+      // just maps named output pads ([vout]/[aout]).
       // -shortest trims to the shorter of video/audio so it never runs past the clip.
+      // Brings the uploaded track up to a consistent, Reels-friendly loudness
+      // (-14 LUFS, the level Instagram/Spotify etc. normalize to) with a
+      // -1dBTP true-peak ceiling so it can't clip.
+      filterGraph.push(`[${audioInputIdx}:a:0]loudnorm=I=-14:TP=-1:LRA=11[aout]`);
       outputOptions = outputOptions.concat(["-map", "[aout]", "-c:a", "aac", "-b:a", "192k", "-shortest"]);
     } else {
       // Original clip audio is optional (`0:a:0?` — some raw uploads have no
-      // audio track at all), so it's mapped directly rather than through the
-      // filter graph (which has no "optional" stream syntax) — no filter
-      // applied here, matching the original per-clip audio as-is.
+      // audio track at all), so an unconditional filter here would error out
+      // on those with "no audio stream to filter". Passed straight through
+      // rather than through the filter graph since there's nothing to do to it.
       outputOptions = outputOptions.concat(["-map", "0:a:0?", "-c:a", "aac", "-b:a", "192k"]);
     }
 
+    // fluent-ffmpeg's "error" event only carries the top-level spawn/exit
+    // error (usually just "ffmpeg exited with code 1"), not ffmpeg's own
+    // stderr explanation of WHY — which is the part that actually says
+    // things like "No such filter" or "Invalid argument". Without it, every
+    // real failure looked identical from the job's jobError field, making a
+    // genuine bug indistinguishable from "nothing happened". Buffered here
+    // (capped) and appended to the rejection below.
+    let stderrTail = "";
+    command.on("stderr", (line) => {
+      stderrTail = (stderrTail + "\n" + line).slice(-4000);
+    });
+
     command
-      .complexFilter(filterSteps)
+      .complexFilter(filterGraph)
       .outputOptions(outputOptions)
       .on("start", (cmd) => console.log("FFmpeg started:", cmd))
-      .on("stderr", (line) => {
-        // loudnorm and a few other filters print their stats/warnings to
-        // stderr even on success — surfacing them makes it possible to spot
-        // an audio problem (e.g. "Input has no audio" ) from the logs
-        // instead of only finding out when a rendered video plays silent.
-        if (/error|no such file|invalid|failed/i.test(line)) console.warn("ffmpeg:", line);
+      .on("progress", (progress) => {
+        if (!onProgress) return;
+        const seconds = timemarkToSeconds(progress.timemark);
+        // Capped at 99 — "done" is only ever declared once the audio
+        // verification safety net below has passed, not the moment ffmpeg's
+        // own progress events tick over 100%.
+        const percent = duration > 0 ? Math.min(99, Math.round((seconds / duration) * 100)) : undefined;
+        onProgress({ percent, seconds });
       })
-      .on("error", (err) => reject(err))
+      .on("error", (err) => {
+        // Full tail goes to the server console for debugging; only a shorter
+        // slice rides along in the rejection, since that message ends up
+        // verbatim in jobError and gets shown to the user via alert().
+        if (stderrTail.trim()) console.error("[ffmpeg stderr]", stderrTail.trim());
+        const shortDetail = stderrTail.trim().slice(-500);
+        reject(shortDetail ? new Error(`${err.message}\n${shortDetail}`) : err);
+      })
       .on("end", async () => {
-        if (rawAudioPath) {
-          // The render "succeeded" from ffmpeg's point of view, but that
-          // alone doesn't guarantee the audio track actually made it in with
-          // real content — verify it rather than silently returning a video
-          // that plays with no sound.
-          const ok = await probeHasAudio(outPath);
-          if (!ok) {
-            reject(new Error("Render finished but the output has no usable audio track — check the uploaded audio file."));
-            return;
-          }
+        try {
+          await verifyRenderedAudio(outPath, { required: !!rawAudioPath });
+          resolve(outPath);
+        } catch (verifyErr) {
+          reject(verifyErr);
         }
-        resolve(outPath);
       })
       .save(outPath);
   });
@@ -199,6 +265,10 @@ export async function renderReel({
 // `y` expression: it drops in from just above the frame during [0, slideIn],
 // holds at its resting y for [slideIn, holdEnd], then rises back out during
 // [holdEnd, duration]. `x` stays fixed (horizontally centered) throughout.
+//
+// Returns a mutable array of filtergraph strings — renderReel above may push
+// an additional (independent) audio filtergraph node onto it before passing
+// the whole thing to a single `.complexFilter()` call.
 function buildFrameFilter({ badge = false, revealAt = 0, tagline = null } = {}) {
   const steps = [
     `color=c=black:s=${CANVAS_W}x${CANVAS_H}[bgblack]`,
