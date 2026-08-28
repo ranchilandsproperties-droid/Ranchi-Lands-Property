@@ -44,6 +44,7 @@ export default function UploadForm({ onCreated }) {
   const [audioFile, setAudioFile] = useState(null);
   const [additionalImageFile, setAdditionalImageFile] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [uploadPercent, setUploadPercent] = useState(0);
   const [error, setError] = useState("");
 
   const set = (key) => (e) => setForm((f) => ({ ...f, [key]: e.target.value }));
@@ -62,12 +63,14 @@ export default function UploadForm({ onCreated }) {
 
     try {
       setLoading(true);
-      const doc = await createProject(fd);
+      setUploadPercent(0);
+      const doc = await createProject(fd, setUploadPercent);
       onCreated(doc);
     } catch (err) {
       setError(err?.response?.data?.error || "Upload failed");
     } finally {
       setLoading(false);
+      setUploadPercent(0);
     }
   }
 
@@ -145,12 +148,33 @@ export default function UploadForm({ onCreated }) {
 
       {error && <p style={{ color: "#ff6b6b" }}>{error}</p>}
 
+      {loading && (
+        <div style={{ marginBottom: 14 }}>
+          <p style={{ fontSize: 13, color: "#9aa0aa", margin: "0 0 6px" }}>
+            Uploading {videoFile ? "video" : ""}
+            {videoFile && audioFile ? " and " : ""}
+            {audioFile ? "audio" : ""}
+            {additionalImageFile ? " (+ image)" : ""} — {uploadPercent}%
+          </p>
+          <div style={{ height: 8, borderRadius: 4, background: "#181b22", overflow: "hidden" }}>
+            <div
+              style={{
+                height: "100%",
+                width: `${uploadPercent}%`,
+                background: "#D4AF37",
+                transition: "width 0.2s ease",
+              }}
+            />
+          </div>
+        </div>
+      )}
+
       <button
         type="submit"
         disabled={loading}
         style={{ padding: "12px 20px", borderRadius: 8, border: "none", background: "#D4AF37", color: "#111", fontWeight: 700, cursor: "pointer" }}
       >
-        {loading ? "Uploading…" : "Upload & start designing →"}
+        {loading ? `Uploading… ${uploadPercent}%` : "Upload & start designing →"}
       </button>
     </form>
   );

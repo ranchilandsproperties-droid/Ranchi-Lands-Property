@@ -9,8 +9,17 @@ export const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
 
 const api = axios.create({ baseURL: `${API_BASE}/api` });
 
-export const createProject = (formData) =>
-  api.post("/videos", formData, { headers: { "Content-Type": "multipart/form-data" } }).then((r) => r.data);
+export const createProject = (formData, onUploadProgress) =>
+  api
+    .post("/videos", formData, {
+      headers: { "Content-Type": "multipart/form-data" },
+      onUploadProgress: onUploadProgress
+        ? (evt) => {
+            if (evt.total) onUploadProgress(Math.round((evt.loaded / evt.total) * 100));
+          }
+        : undefined,
+    })
+    .then((r) => r.data);
 
 export const getProject = (id) => api.get(`/videos/${id}`).then((r) => r.data);
 

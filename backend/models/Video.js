@@ -79,13 +79,18 @@ const VideoSchema = new mongoose.Schema(
     // ---- background render job tracking ----
     // Rendering (node-canvas rasterization + ffmpeg encode) can take longer
     // than a single HTTP request should be held open for, especially on a
-    // slow/free-tier host — so preview/finalize renders now run in the
-    // background and the request returns immediately once the job is
+    // slow/free-tier host — so preview/finalize/preview-image renders all run
+    // in the background and the request returns immediately once the job is
     // queued. The frontend polls GET /api/videos/:id and watches these
     // fields instead of waiting on one long response.
     jobStatus: { type: String, enum: ["idle", "rendering", "done", "error"], default: "idle" },
-    jobKind: { type: String, enum: [null, "preview", "finalize"], default: null },
+    jobKind: { type: String, enum: [null, "preview", "finalize", "preview-image"], default: null },
     jobError: { type: String, default: null },
+    // 0-100, updated from ffmpeg's own progress events while jobStatus is
+    // "rendering" — lets the frontend show a real percentage instead of a
+    // plain spinner. Not meaningful for "preview-image" jobs (a single-frame
+    // grab finishes too fast for this to matter).
+    jobProgress: { type: Number, default: 0 },
   },
   { timestamps: true }
 );

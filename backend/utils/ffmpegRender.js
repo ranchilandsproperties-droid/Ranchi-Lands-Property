@@ -25,6 +25,23 @@ function getVideoDurationSeconds(filePath) {
   });
 }
 
+// Checks whether a rendered file actually contains a usable audio stream
+// (present AND with a real, non-zero duration). Used as a safety net right
+// after a render that was supposed to include audio — without this, a
+// silently-empty/zero-length audio track (e.g. a malformed source WAV, or a
+// filtergraph mistake) would produce a video that *looks* successful but
+// plays with no sound, with nothing in the logs pointing at why.
+function probeHasAudio(filePath) {
+  return new Promise((resolve) => {
+    ffmpeg.ffprobe(filePath, (err, data) => {
+      if (err) return resolve(false);
+      const audioStream = (data?.streams || []).find((s) => s.codec_type === "audio");
+      const dur = parseFloat(audioStream?.duration ?? data?.format?.duration);
+      resolve(Boolean(audioStream) && Number.isFinite(dur) && dur > 0.1);
+    });
+  });
+}
+
 /**
  * renderReel
  *  - Fits the ENTIRE raw video into the 1080x1920 Reels canvas without cropping
@@ -56,16 +73,16 @@ export async function renderReel({
   taglineSlideSeconds = 0.9,
   outPath,
   quality = "high",
+  onProgress, // optional (percent: number) => void, 0-100
 }) {
   const q = QUALITY_PRESETS[quality] || QUALITY_PRESETS.high;
 
-  // Both the badge reveal point and the tagline's slide-in/hold/slide-out
-  // timing are fractions/offsets of the clip's total length, so probe it
-  // once up front and reuse it for whichever of the two is present.
-  let duration = 0;
-  if (badgeOverlayPngPath || taglineOverlayPngPath) {
-    duration = await getVideoDurationSeconds(rawVideoPath);
-  }
+  // Always probed now (previously only when a badge/tagline needed it) so
+  // there's a known total duration to compute a real progress percentage
+  // against — ffmpeg's own `progress` event doesn't reliably include
+  // `percent` for every input, but always includes `timemark`, which we can
+  // turn into a percentage ourselves once we know how long the clip is.
+  const duration = await getVideoDurationSeconds(rawVideoPath);
 
   let revealAt = 0;
   if (badgeOverlayPngPath) {
@@ -92,7 +109,7 @@ export async function renderReel({
     if (badgeOverlayPngPath) command.input(badgeOverlayPngPath);
     if (taglineOverlayPngPath) command.input(taglineOverlayPngPath);
 
-    const videoFilter = buildFrameFilter({ badge: !!badgeOverlayPngPath, revealAt, tagline });
+    const filterSteps = buildFrameFilter({ badge: !!badgeOverlayPngPath, revealAt, tagline });
 
     let outputOptions = [
       "-map",
@@ -117,38 +134,53 @@ export async function renderReel({
       command.input(rawAudioPath);
       // input index shifts by one for each of the badge/tagline overlays that are also present
       const audioInputIdx = 2 + (badgeOverlayPngPath ? 1 : 0) + (taglineOverlayPngPath ? 1 : 0);
-      // -shortest trims to the shorter of video/audio so it never runs past the clip.
       // loudnorm brings the uploaded track up to a consistent, Reels-friendly
       // loudness (-14 LUFS, the level Instagram/Spotify etc. normalize to)
-      // with a -1dBTP true-peak ceiling so it can't clip — previously there
-      // was no gain/normalization at all, so a quietly-recorded voiceover or
-      // music track played back noticeably quieter than the source file.
-      outputOptions = outputOptions.concat([
-        "-map",
-        `${audioInputIdx}:a:0`,
-        "-af",
-        "loudnorm=I=-14:TP=-1:LRA=11",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "192k",
-        "-shortest",
-      ]);
+      // with a -1dBTP true-peak ceiling so it can't clip. This now lives IN
+      // the same -filter_complex graph as the video (labeled [aout]) rather
+      // than as a separate -af alongside -map — mixing an explicit -map with
+      // a simple -af on a command that already has -filter_complex is a
+      // known source of ffmpeg quietly producing an empty/silent audio
+      // stream, which is what was actually causing "no audio at all" rather
+      // than just quiet audio. Folding it into the complex graph removes
+      // that ambiguity entirely.
+      filterSteps.push(`[${audioInputIdx}:a:0]loudnorm=I=-14:TP=-1:LRA=11[aout]`);
+      // -shortest trims to the shorter of video/audio so it never runs past the clip.
+      outputOptions = outputOptions.concat(["-map", "[aout]", "-c:a", "aac", "-b:a", "192k", "-shortest"]);
     } else {
       // Original clip audio is optional (`0:a:0?` — some raw uploads have no
-      // audio track at all), so an unconditional `-af` here would error out
-      // on those with "no audio stream to filter". Left as-is; the loudness
-      // fix above covers the case the user actually reported (an uploaded
-      // voiceover/music track playing back too quiet).
+      // audio track at all), so it's mapped directly rather than through the
+      // filter graph (which has no "optional" stream syntax) — no filter
+      // applied here, matching the original per-clip audio as-is.
       outputOptions = outputOptions.concat(["-map", "0:a:0?", "-c:a", "aac", "-b:a", "192k"]);
     }
 
     command
-      .complexFilter(videoFilter)
+      .complexFilter(filterSteps)
       .outputOptions(outputOptions)
       .on("start", (cmd) => console.log("FFmpeg started:", cmd))
+      .on("stderr", (line) => {
+        // loudnorm and a few other filters print their stats/warnings to
+        // stderr even on success — surfacing them makes it possible to spot
+        // an audio problem (e.g. "Input has no audio" ) from the logs
+        // instead of only finding out when a rendered video plays silent.
+        if (/error|no such file|invalid|failed/i.test(line)) console.warn("ffmpeg:", line);
+      })
       .on("error", (err) => reject(err))
-      .on("end", () => resolve(outPath))
+      .on("end", async () => {
+        if (rawAudioPath) {
+          // The render "succeeded" from ffmpeg's point of view, but that
+          // alone doesn't guarantee the audio track actually made it in with
+          // real content — verify it rather than silently returning a video
+          // that plays with no sound.
+          const ok = await probeHasAudio(outPath);
+          if (!ok) {
+            reject(new Error("Render finished but the output has no usable audio track — check the uploaded audio file."));
+            return;
+          }
+        }
+        resolve(outPath);
+      })
       .save(outPath);
   });
 }

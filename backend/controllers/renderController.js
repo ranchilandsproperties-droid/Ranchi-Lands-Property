@@ -51,17 +51,46 @@ async function runRender(doc, quality) {
   return outPath;
 }
 
+async function runPreviewImage(doc) {
+  const overlayPath = path.join(TEMP_DIR, `overlay-${doc._id}-${uuid()}.png`);
+  await buildOverlayPng(doc, overlayPath);
+
+  const outPath = path.join(OUTPUT_DIR, `preview-${doc._id}-${uuid()}.jpg`);
+  try {
+    await renderPreviewImage({ rawVideoPath: doc.rawVideoPath, overlayPngPath: overlayPath, outPath, atSeconds: 1 });
+  } catch {
+    // clip shorter than 1s (or seek otherwise failed) — retry from the very first frame
+    await renderPreviewImage({ rawVideoPath: doc.rawVideoPath, overlayPngPath: overlayPath, outPath, atSeconds: 0 });
+  }
+  fs.unlink(overlayPath, () => {});
+  return outPath;
+}
+
 // Runs the actual render OFF the request/response cycle and records the
 // result on the document once it's done. This is what lets renderPreview /
-// finalizeAndCleanup below respond immediately instead of holding the HTTP
-// connection open for the whole encode — video rendering (node-canvas +
-// ffmpeg) routinely takes longer than a proxy's or Node's own default
-// request timeout allows, which is exactly what was causing renders to
-// "always disconnect" before finishing even though ffmpeg itself was fine.
+// finalizeAndCleanup / renderPreviewImageCtrl below respond immediately
+// instead of holding the HTTP connection open for the whole encode — video
+// rendering (node-canvas + ffmpeg) routinely takes longer than a proxy's or
+// Node's own default request timeout allows, which is exactly what was
+// causing renders to "always disconnect" (or the frontend to see a network
+// error while waiting) before finishing, even though ffmpeg itself was fine.
 async function runRenderJob(docId, kind, quality) {
   try {
     const doc = await Video.findById(docId);
     if (!doc) return; // project was deleted mid-render; nothing to update
+
+    if (kind === "preview-image") {
+      const outPath = await runPreviewImage(doc);
+      if (doc.previewImagePath && fs.existsSync(doc.previewImagePath) && doc.previewImagePath !== outPath) {
+        fs.unlink(doc.previewImagePath, () => {});
+      }
+      await Video.findByIdAndUpdate(docId, {
+        previewImagePath: outPath,
+        jobStatus: "done",
+        jobError: null,
+      });
+      return;
+    }
 
     const outPath = await runRender(doc, quality);
 
@@ -93,71 +122,51 @@ async function runRenderJob(docId, kind, quality) {
   }
 }
 
-// Draft/preview render — raw source files are KEPT so the design stays
-// editable. Starts the render in the background and returns right away;
-// poll GET /api/videos/:id and watch `jobStatus` ("rendering" -> "done" or
-// "error") to know when previewOutputPath is ready.
-export async function renderPreview(req, res) {
+// Shared "start a background render job" flow used by all three endpoints
+// below — validates the raw video is present and no other job is already
+// running, flips jobStatus to "rendering", and fires the actual work off
+// without awaiting it so the request can return immediately.
+async function startJob(req, res, kind, run) {
   try {
     const doc = await Video.findById(req.params.id);
     if (!doc) return res.status(404).json({ error: "Not found" });
     if (!doc.rawVideoPath || !fs.existsSync(doc.rawVideoPath)) {
-      return res.status(400).json({ error: "Raw video no longer on server." });
+      return res.status(400).json({ error: "Raw video is no longer on the server — it may have been deleted already." });
     }
     if (doc.jobStatus === "rendering") {
       return res.status(409).json({ error: "A render is already in progress for this project." });
     }
 
-    const quality = req.body?.quality || "standard"; // previews default to the fast tier
     doc.jobStatus = "rendering";
-    doc.jobKind = "preview";
+    doc.jobKind = kind;
     doc.jobError = null;
     await doc.save();
 
-    runRenderJob(doc._id, "preview", quality); // fire-and-forget on purpose
+    run(doc); // fire-and-forget on purpose — see runRenderJob's comment above
 
-    res.status(202).json({ message: "Preview render started", video: doc });
+    res.status(202).json({ message: `${kind} started`, video: doc });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Could not start render", details: err.message });
   }
 }
 
+// Draft/preview render — raw source files are KEPT so the design stays
+// editable. Starts the render in the background and returns right away;
+// poll GET /api/videos/:id and watch `jobStatus` ("rendering" -> "done" or
+// "error") to know when previewOutputPath is ready.
+export async function renderPreview(req, res) {
+  const quality = req.body?.quality || "standard"; // previews default to the fast tier
+  await startJob(req, res, "preview", (doc) => runRenderJob(doc._id, "preview", quality));
+}
+
 // Fast static-image preview of the generated template — a single JPEG frame
 // showing exactly how the frame/text/badge/footer/optional extras will sit
-// over the footage, without waiting for a full MP4 render. Raw source files
-// are kept either way (this never touches finalize's cleanup step).
+// over the footage. Same background-job pattern as the others: on a slow
+// host even this single-frame grab can take long enough to trip a proxy
+// timeout, so it no longer blocks the request either.
 export async function renderPreviewImageCtrl(req, res) {
-  try {
-    const doc = await Video.findById(req.params.id);
-    if (!doc) return res.status(404).json({ error: "Not found" });
-    if (!doc.rawVideoPath || !fs.existsSync(doc.rawVideoPath)) {
-      return res.status(400).json({ error: "Raw video no longer on server (project already finalized)." });
-    }
-
-    const overlayPath = path.join(TEMP_DIR, `overlay-${doc._id}-${uuid()}.png`);
-    await buildOverlayPng(doc, overlayPath);
-
-    const outPath = path.join(OUTPUT_DIR, `preview-${doc._id}-${uuid()}.jpg`);
-    try {
-      await renderPreviewImage({ rawVideoPath: doc.rawVideoPath, overlayPngPath: overlayPath, outPath, atSeconds: 1 });
-    } catch {
-      // clip shorter than 1s (or seek otherwise failed) — retry from the very first frame
-      await renderPreviewImage({ rawVideoPath: doc.rawVideoPath, overlayPngPath: overlayPath, outPath, atSeconds: 0 });
-    }
-    fs.unlink(overlayPath, () => {});
-
-    if (doc.previewImagePath && fs.existsSync(doc.previewImagePath)) {
-      fs.unlink(doc.previewImagePath, () => {});
-    }
-    doc.previewImagePath = outPath;
-    await doc.save();
-
-    res.json({ message: "Preview image generated", previewImageUrl: `/outputs/${path.basename(outPath)}`, video: doc });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Preview image generation failed", details: err.message });
-  }
+  await startJob(req, res, "preview-image", (doc) => runRenderJob(doc._id, "preview-image"));
 }
 
 // Final export — renders once more from the latest design. The raw uploaded
@@ -169,29 +178,8 @@ export async function renderPreviewImageCtrl(req, res) {
 // Same background-job pattern as renderPreview above — starts the render and
 // returns immediately; poll GET /api/videos/:id for jobStatus/finalOutputPath.
 export async function finalizeAndCleanup(req, res) {
-  try {
-    const doc = await Video.findById(req.params.id);
-    if (!doc) return res.status(404).json({ error: "Not found" });
-    if (!doc.rawVideoPath || !fs.existsSync(doc.rawVideoPath)) {
-      return res.status(400).json({ error: "Raw video no longer on server (already deleted)." });
-    }
-    if (doc.jobStatus === "rendering") {
-      return res.status(409).json({ error: "A render is already in progress for this project." });
-    }
-
-    const quality = req.body?.quality || "high";
-    doc.jobStatus = "rendering";
-    doc.jobKind = "finalize";
-    doc.jobError = null;
-    await doc.save();
-
-    runRenderJob(doc._id, "finalize", quality); // fire-and-forget on purpose
-
-    res.status(202).json({ message: "Final export started", video: doc });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Could not start final export", details: err.message });
-  }
+  const quality = req.body?.quality || "high";
+  await startJob(req, res, "finalize", (doc) => runRenderJob(doc._id, "finalize", quality));
 }
 
 // Explicit, user-triggered cleanup — deletes the raw uploaded video/audio
