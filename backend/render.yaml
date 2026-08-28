@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: land-reels-backend
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    envVars:
+      - key: MONGO_URI
+        sync: false # paste your MongoDB Atlas free-tier connection string in the Render dashboard
+      - key: CLIENT_ORIGIN
+        sync: false # your Vercel frontend URL, e.g. https://land-reels.vercel.app
+      - key: PORT
+        value: 10000
